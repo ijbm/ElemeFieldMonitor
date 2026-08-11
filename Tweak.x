@@ -2939,11 +2939,7 @@ static NSMutableDictionary *g_hmacContexts = nil;
 }
 
 // --- Hook: CCCrypt (AES/DES/3DES/RC4/RC2/Blowfish) ---
-%hookf(CCCryptorStatus, CCCrypt, CCOperation op, CCAlgorithm alg, CCOptions options,
-       const void *key, size_t keyLength,
-       const void *iv, size_t ivLength,
-       const void *dataIn, size_t dataInLength,
-       void *dataOut, size_t dataOutAvailable, size_t *dataOutMoved) {
+%hookf(CCCryptorStatus, CCCrypt, CCOperation op, CCAlgorithm alg, CCOptions options, const void *key, size_t keyLength, const void *iv, size_t ivLength, const void *dataIn, size_t dataInLength, void *dataOut, size_t dataOutAvailable, size_t *dataOutMoved) {
     CCCryptorStatus status = %orig;
     if (status == kCCSuccess) {
         @try {
