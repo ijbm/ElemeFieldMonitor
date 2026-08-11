@@ -195,6 +195,7 @@ static NSDictionary *g_lastHeaders = nil;
 @property (nonatomic, strong) UIView *tabFieldsIndicator;
 @property (nonatomic, strong) UIView *tabHarIndicator;
 @property (nonatomic, assign) NSInteger activeTab; // 0=fields, 1=har
+@property (nonatomic, strong) UIView *detailOverlayView;
 
 @property (nonatomic, strong) UILabel *titleLabel;
 @property (nonatomic, strong) UILabel *statusLabel;
@@ -241,6 +242,11 @@ static NSDictionary *g_lastHeaders = nil;
 - (void)tabFieldsTapped;
 - (void)tabHarTapped;
 - (void)clearHar;
+- (void)showHarDetail:(NSDictionary *)entry;
+- (void)dismissHarDetail;
+- (void)handleHarCardTap:(UITapGestureRecognizer *)gesture;
+- (void)copyHarRequest:(UIButton *)btn;
+- (void)copyHarResponse:(UIButton *)btn;
 
 @end
 
@@ -767,17 +773,19 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
 - (void)handleLongPress:(UILongPressGestureRecognizer *)gesture {
     if (gesture.state != UIGestureRecognizerStateBegan) return;
     UIView *container = gesture.view;
-    // 找到 value label (第二个子视图)
+    // 查找最右侧的 UILabel 作为 value label
     UILabel *valueLabel = nil;
+    CGFloat maxX = -1;
     for (UIView *sub in container.subviews) {
         if ([sub isKindOfClass:[UILabel class]]) {
             UILabel *lbl = (UILabel *)sub;
-            if (![lbl.text containsString:@":"] && ![lbl.text isEqualToString:@"(waiting..."]) {
+            if (lbl.frame.origin.x > maxX) {
+                maxX = lbl.frame.origin.x;
                 valueLabel = lbl;
             }
         }
     }
-    if (valueLabel && valueLabel.text.length > 0) {
+    if (valueLabel && valueLabel.text.length > 0 && ![valueLabel.text isEqualToString:@"(waiting...)"]) {
         UIPasteboard.generalPasteboard.string = valueLabel.text;
         [self showToast:[NSString stringWithFormat:@"Copied: %@", valueLabel.text]];
     }
@@ -1355,6 +1363,12 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
             respLabel.numberOfLines = 2;
             [card addSubview:respLabel];
 
+            // 点击查看详情
+            card.tag = 1000 + i;
+            UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc]
+                initWithTarget:self action:@selector(handleHarCardTap:)];
+            [card addGestureRecognizer:tap];
+
             cy += cardH + cardSpacing;
         }
 
@@ -1424,6 +1438,314 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
         }
 
         self.harScrollView.contentSize = CGSizeMake(self.harScrollView.bounds.size.width, cy + 8);
+    });
+}
+
+- (void)handleHarCardTap:(UITapGestureRecognizer *)gesture {
+    UIView *card = gesture.view;
+    NSInteger tag = card.tag;
+    if (tag < 1000) return;
+    NSInteger idx = tag - 1000;
+    if (idx >= 0 && idx < (NSInteger)self.harEntries.count) {
+        NSDictionary *entry = self.harEntries[idx];
+        [self showHarDetail:entry];
+    }
+}
+
+- (void)showHarDetail:(NSDictionary *)entry {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (self.detailOverlayView) {
+            [self.detailOverlayView removeFromSuperview];
+        }
+
+        CGFloat windowW = self.window.bounds.size.width;
+        CGFloat windowH = self.window.bounds.size.height;
+
+        // 半透明遮罩
+        self.detailOverlayView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, windowW, windowH)];
+        self.detailOverlayView.backgroundColor = [UIColor colorWithRed:0 green:0 blue:0 alpha:0.5];
+        self.detailOverlayView.tag = 7777;
+        [self.containerView addSubview:self.detailOverlayView];
+
+        // 点击遮罩关闭
+        UITapGestureRecognizer *maskTap = [[UITapGestureRecognizer alloc]
+            initWithTarget:self action:@selector(dismissHarDetail)];
+        [self.detailOverlayView addGestureRecognizer:maskTap];
+
+        // 详情面板
+        CGFloat panelMargin = 8;
+        CGFloat panelW = windowW - panelMargin * 2;
+        CGFloat panelH = windowH - panelMargin * 2;
+        UIView *panel = [[UIView alloc] initWithFrame:CGRectMake(panelMargin, panelMargin, panelW, panelH)];
+        panel.backgroundColor = [UIColor colorWithRed:0.08 green:0.08 blue:0.10 alpha:0.98];
+        panel.layer.cornerRadius = 12;
+        panel.layer.masksToBounds = YES;
+        panel.layer.borderWidth = 1;
+        panel.layer.borderColor = [UIColor colorWithRed:0.18 green:0.18 blue:0.22 alpha:0.8].CGColor;
+        [self.detailOverlayView addSubview:panel];
+
+        // 关闭按钮
+        UIButton *closeBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+        closeBtn.frame = CGRectMake(panelW - 32, 6, 26, 24);
+        [closeBtn setTitle:@"✕" forState:UIControlStateNormal];
+        [closeBtn setTitleColor:[UIColor colorWithRed:0.9 green:0.3 blue:0.3 alpha:1.0] forState:UIControlStateNormal];
+        closeBtn.titleLabel.font = [UIFont boldSystemFontOfSize:14];
+        [closeBtn addTarget:self action:@selector(dismissHarDetail) forControlEvents:UIControlEventTouchUpInside];
+        [panel addSubview:closeBtn];
+
+        // 标题
+        NSString *apiName = entry[@"_api"] ?: @"Entry";
+        UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(12, 8, panelW - 50, 20)];
+        title.text = apiName;
+        title.textColor = [UIColor colorWithRed:0.40 green:0.78 blue:0.47 alpha:1.0];
+        title.font = [UIFont fontWithName:@"Menlo" size:11];
+        title.adjustsFontSizeToFitWidth = YES;
+        title.minimumScaleFactor = 0.5;
+        [panel addSubview:title];
+
+        // 分割线
+        UIView *divider = [[UIView alloc] initWithFrame:CGRectMake(0, 30, panelW, 1)];
+        divider.backgroundColor = [UIColor colorWithRed:0.18 green:0.18 blue:0.22 alpha:1.0];
+        [panel addSubview:divider];
+
+        // ScrollView for detail content
+        UIScrollView *detailScroll = [[UIScrollView alloc] initWithFrame:CGRectMake(0, 31, panelW, panelH - 31 - 40)];
+        detailScroll.showsVerticalScrollIndicator = YES;
+        [panel addSubview:detailScroll];
+
+        NSDictionary *req = entry[@"request"];
+        NSDictionary *resp = entry[@"response"];
+
+        CGFloat cy = 8;
+        CGFloat pad = 12;
+        CGFloat lblW = panelW - pad * 2;
+
+        // --- Request section ---
+        UILabel *reqHeader = [[UILabel alloc] initWithFrame:CGRectMake(pad, cy, lblW, 18)];
+        reqHeader.text = @"▼ Request";
+        reqHeader.textColor = [UIColor colorWithRed:0.25 green:0.60 blue:1.0 alpha:1.0];
+        reqHeader.font = [UIFont boldSystemFontOfSize:11];
+        [detailScroll addSubview:reqHeader];
+        cy += 20;
+
+        // Method
+        UILabel *methodLabel = [[UILabel alloc] initWithFrame:CGRectMake(pad, cy, lblW, 16)];
+        methodLabel.text = [NSString stringWithFormat:@"Method: %@", req[@"method"] ?: @"?"];
+        methodLabel.textColor = [UIColor colorWithRed:0.50 green:0.58 blue:0.65 alpha:1.0];
+        methodLabel.font = [UIFont fontWithName:@"Menlo" size:10];
+        [detailScroll addSubview:methodLabel];
+        cy += 16;
+
+        // URL
+        UILabel *urlLabel = [[UILabel alloc] initWithFrame:CGRectMake(pad, cy, lblW, 16)];
+        urlLabel.text = [NSString stringWithFormat:@"URL: %@", req[@"url"] ?: @"-"];
+        urlLabel.textColor = [UIColor colorWithRed:0.55 green:0.65 blue:0.90 alpha:1.0];
+        urlLabel.font = [UIFont fontWithName:@"Menlo" size:9];
+        urlLabel.adjustsFontSizeToFitWidth = YES;
+        urlLabel.minimumScaleFactor = 0.4;
+        urlLabel.numberOfLines = 2;
+        [detailScroll addSubview:urlLabel];
+        cy += 22;
+
+        // Headers
+        UILabel *hdrTitle = [[UILabel alloc] initWithFrame:CGRectMake(pad, cy, lblW, 16)];
+        hdrTitle.text = @"Headers:";
+        hdrTitle.textColor = [UIColor colorWithRed:0.50 green:0.58 blue:0.65 alpha:1.0];
+        hdrTitle.font = [UIFont boldSystemFontOfSize:9];
+        [detailScroll addSubview:hdrTitle];
+        cy += 16;
+
+        NSArray *headers = req[@"headers"] ?: @[];
+        for (NSDictionary *hdr in headers) {
+            NSString *hdrText = [NSString stringWithFormat:@"%@: %@", hdr[@"name"] ?: @"?", hdr[@"value"] ?: @"?"];
+            UILabel *hdrLabel = [[UILabel alloc] initWithFrame:CGRectMake(pad + 8, cy, lblW - 8, 14)];
+            hdrLabel.text = hdrText;
+            hdrLabel.textColor = [UIColor colorWithRed:0.60 green:0.60 blue:0.65 alpha:1.0];
+            hdrLabel.font = [UIFont fontWithName:@"Menlo" size:8];
+            hdrLabel.adjustsFontSizeToFitWidth = YES;
+            hdrLabel.minimumScaleFactor = 0.4;
+            hdrLabel.numberOfLines = 2;
+            [detailScroll addSubview:hdrLabel];
+            cy += 16;
+        }
+
+        // Request Body
+        NSString *bodyStr = @"";
+        if (req[@"postData"][@"text"]) {
+            bodyStr = req[@"postData"][@"text"];
+        }
+        UILabel *bodyTitle = [[UILabel alloc] initWithFrame:CGRectMake(pad, cy, lblW, 16)];
+        bodyTitle.text = @"Request Body:";
+        bodyTitle.textColor = [UIColor colorWithRed:0.50 green:0.58 blue:0.65 alpha:1.0];
+        bodyTitle.font = [UIFont boldSystemFontOfSize:9];
+        [detailScroll addSubview:bodyTitle];
+        cy += 16;
+
+        // 尝试格式化 JSON
+        NSString *formattedBody = bodyStr;
+        if (bodyStr.length > 0) {
+            @try {
+                NSData *bd = [bodyStr dataUsingEncoding:NSUTF8StringEncoding];
+                id jsonObj = [NSJSONSerialization JSONObjectWithData:bd options:NSJSONReadingAllowFragments error:nil];
+                if (jsonObj) {
+                    NSData *pretty = [NSJSONSerialization dataWithJSONObject:jsonObj options:NSJSONWritingPrettyPrinted error:nil];
+                    NSString *prettyStr = [[NSString alloc] initWithData:pretty encoding:NSUTF8StringEncoding];
+                    if (prettyStr) formattedBody = prettyStr;
+                }
+            } @catch (NSException *e) {}
+        }
+
+        // 计算 body 高度
+        UIFont *bodyFont = [UIFont fontWithName:@"Menlo" size:8];
+        CGSize bodySize = [formattedBody boundingRectWithSize:CGSizeMake(lblW, CGFLOAT_MAX)
+                                                       options:NSStringDrawingUsesLineFragmentOrigin
+                                                    attributes:@{NSFontAttributeName: bodyFont}
+                                                       context:nil].size;
+        CGFloat bodyHeight = MAX(bodySize.height + 8, 30);
+        UILabel *bodyContent = [[UILabel alloc] initWithFrame:CGRectMake(pad + 8, cy, lblW - 8, bodyHeight)];
+        bodyContent.text = formattedBody;
+        bodyContent.textColor = [UIColor colorWithRed:0.85 green:0.75 blue:0.45 alpha:1.0];
+        bodyContent.font = bodyFont;
+        bodyContent.numberOfLines = 0;
+        bodyContent.lineBreakMode = NSLineBreakByCharWrapping;
+        [detailScroll addSubview:bodyContent];
+        cy += bodyHeight + 8;
+
+        // --- Response section ---
+        UILabel *respHeader = [[UILabel alloc] initWithFrame:CGRectMake(pad, cy, lblW, 18)];
+        respHeader.text = @"▼ Response";
+        respHeader.textColor = [UIColor colorWithRed:0.32 green:0.77 blue:0.10 alpha:1.0];
+        respHeader.font = [UIFont boldSystemFontOfSize:11];
+        [detailScroll addSubview:respHeader];
+        cy += 20;
+
+        // Status
+        NSInteger statusCode = [resp[@"status"] integerValue];
+        UILabel *statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(pad, cy, lblW, 16)];
+        statusLabel.text = [NSString stringWithFormat:@"Status: %ld", (long)statusCode];
+        statusLabel.textColor = [UIColor colorWithRed:0.50 green:0.58 blue:0.65 alpha:1.0];
+        statusLabel.font = [UIFont fontWithName:@"Menlo" size:10];
+        [detailScroll addSubview:statusLabel];
+        cy += 18;
+
+        // Response Body
+        NSString *respStr = @"";
+        if (resp[@"content"][@"text"]) {
+            respStr = resp[@"content"][@"text"];
+        }
+        UILabel *respBodyTitle = [[UILabel alloc] initWithFrame:CGRectMake(pad, cy, lblW, 16)];
+        respBodyTitle.text = @"Response Body:";
+        respBodyTitle.textColor = [UIColor colorWithRed:0.50 green:0.58 blue:0.65 alpha:1.0];
+        respBodyTitle.font = [UIFont boldSystemFontOfSize:9];
+        [detailScroll addSubview:respBodyTitle];
+        cy += 16;
+
+        // 格式化 response JSON
+        NSString *formattedResp = respStr;
+        if (respStr.length > 0) {
+            @try {
+                NSData *rd = [respStr dataUsingEncoding:NSUTF8StringEncoding];
+                id jsonResp = [NSJSONSerialization JSONObjectWithData:rd options:NSJSONReadingAllowFragments error:nil];
+                if (jsonResp) {
+                    NSData *prettyResp = [NSJSONSerialization dataWithJSONObject:jsonResp options:NSJSONWritingPrettyPrinted error:nil];
+                    NSString *prettyRespStr = [[NSString alloc] initWithData:prettyResp encoding:NSUTF8StringEncoding];
+                    if (prettyRespStr) formattedResp = prettyRespStr;
+                }
+            } @catch (NSException *e) {}
+        }
+
+        CGSize respSize = [formattedResp boundingRectWithSize:CGSizeMake(lblW, CGFLOAT_MAX)
+                                                      options:NSStringDrawingUsesLineFragmentOrigin
+                                                   attributes:@{NSFontAttributeName: bodyFont}
+                                                      context:nil].size;
+        CGFloat respHeight = MAX(respSize.height + 8, 30);
+        UILabel *respContent = [[UILabel alloc] initWithFrame:CGRectMake(pad + 8, cy, lblW - 8, respHeight)];
+        respContent.text = formattedResp;
+        respContent.textColor = [UIColor colorWithRed:0.65 green:0.80 blue:0.55 alpha:1.0];
+        respContent.font = bodyFont;
+        respContent.numberOfLines = 0;
+        respContent.lineBreakMode = NSLineBreakByCharWrapping;
+        [detailScroll addSubview:respContent];
+        cy += respHeight + 8;
+
+        detailScroll.contentSize = CGSizeMake(panelW, cy + 8);
+
+        // 底部操作栏
+        UIView *detailFooter = [[UIView alloc] initWithFrame:CGRectMake(0, panelH - 40, panelW, 40)];
+        detailFooter.backgroundColor = [UIColor colorWithRed:0.09 green:0.09 blue:0.12 alpha:1.0];
+        [panel addSubview:detailFooter];
+
+        UIView *fDivider = [[UIView alloc] initWithFrame:CGRectMake(0, 0, panelW, 1)];
+        fDivider.backgroundColor = [UIColor colorWithRed:0.18 green:0.18 blue:0.22 alpha:1.0];
+        [detailFooter addSubview:fDivider];
+
+        CGFloat dBtnH = 28;
+        CGFloat dBtnSpacing = 8;
+        CGFloat dBtnW = (panelW - dBtnSpacing * 3) / 2;
+        CGFloat dBtnY = (40 - dBtnH) / 2;
+
+        // Copy Request
+        UIButton *copyReqBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+        copyReqBtn.frame = CGRectMake(dBtnSpacing, dBtnY, dBtnW, dBtnH);
+        [copyReqBtn setTitle:@"Copy Request" forState:UIControlStateNormal];
+        [copyReqBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+        copyReqBtn.titleLabel.font = [UIFont systemFontOfSize:10];
+        copyReqBtn.backgroundColor = [UIColor colorWithRed:0.12 green:0.40 blue:0.78 alpha:0.85];
+        copyReqBtn.layer.cornerRadius = 6;
+        [copyReqBtn addTarget:self action:@selector(copyHarRequest:) forControlEvents:UIControlEventTouchUpInside];
+        copyReqBtn.tag = 7001;
+        [copyReqBtn setValue:bodyStr forKey:@"bodyText"];
+        [detailFooter addSubview:copyReqBtn];
+
+        // Copy Response
+        UIButton *copyRespBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+        copyRespBtn.frame = CGRectMake(dBtnSpacing * 2 + dBtnW, dBtnY, dBtnW, dBtnH);
+        [copyRespBtn setTitle:@"Copy Response" forState:UIControlStateNormal];
+        [copyRespBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+        copyRespBtn.titleLabel.font = [UIFont systemFontOfSize:10];
+        copyRespBtn.backgroundColor = [UIColor colorWithRed:0.20 green:0.52 blue:0.30 alpha:0.85];
+        copyRespBtn.layer.cornerRadius = 6;
+        [copyRespBtn addTarget:self action:@selector(copyHarResponse:) forControlEvents:UIControlEventTouchUpInside];
+        copyRespBtn.tag = 7002;
+        [copyRespBtn setValue:respStr forKey:@"respText"];
+        [detailFooter addSubview:copyRespBtn];
+
+        // 动画弹出
+        panel.transform = CGAffineTransformMakeScale(0.9, 0.9);
+        panel.alpha = 0;
+        [UIView animateWithDuration:0.2 animations:^{
+            panel.transform = CGAffineTransformIdentity;
+            panel.alpha = 1.0;
+        }];
+    });
+}
+
+- (void)copyHarRequest:(UIButton *)btn {
+    NSString *body = [btn valueForKey:@"bodyText"];
+    if (body && body.length > 0) {
+        UIPasteboard.generalPasteboard.string = body;
+        [self showToast:@"Request body copied!"];
+    }
+}
+
+- (void)copyHarResponse:(UIButton *)btn {
+    NSString *resp = [btn valueForKey:@"respText"];
+    if (resp && resp.length > 0) {
+        UIPasteboard.generalPasteboard.string = resp;
+        [self showToast:@"Response body copied!"];
+    }
+}
+
+- (void)dismissHarDetail {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (self.detailOverlayView) {
+            [UIView animateWithDuration:0.15 animations:^{
+                self.detailOverlayView.alpha = 0;
+            } completion:^(BOOL finished) {
+                [self.detailOverlayView removeFromSuperview];
+                self.detailOverlayView = nil;
+            }];
+        }
     });
 }
 
