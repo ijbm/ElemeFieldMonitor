@@ -565,7 +565,7 @@ static NSArray *kTargetKeys(void) {
         NSArray *importantKeys = @[@"encryptSceneCode", @"encryptActCode", @"rightId", @"actCode"];
         BOOL hasImportant = NO;
         for (NSString *ik in importantKeys) {
-            if (results[ik]) { hasImportant = YES; break; }
+            if (dict[ik]) { hasImportant = YES; break; }
         }
         
         if (hasNewData || (api && hasImportant)) {
