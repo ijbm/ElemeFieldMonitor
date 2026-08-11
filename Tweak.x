@@ -157,8 +157,11 @@ static NSArray *kTargetKeys(void) {
 @property (nonatomic, strong) UIButton *clearButton;
 @property (nonatomic, strong) UIButton *collapseBtn;
 @property (nonatomic, strong) UIButton *historyBtn;
+@property (nonatomic, strong) UIButton *cookieCopyBtn;
 @property (nonatomic, strong) UILabel *urlLabel;
+@property (nonatomic, strong) UILabel *cookieLabel;
 @property (nonatomic, strong) NSString *lastURL;
+@property (nonatomic, strong) NSString *lastCookie;
 @property (nonatomic, assign) BOOL collapsed;
 @property (nonatomic, strong) NSMutableArray *historyRecords;
 
@@ -169,7 +172,9 @@ static NSArray *kTargetKeys(void) {
 - (void)toggleCollapse;
 - (void)updateWithDictionary:(NSDictionary *)dict source:(NSString *)source api:(NSString *)api;
 - (void)updateURL:(NSString *)url;
+- (void)updateCookie:(NSString *)cookie;
 - (void)copyAllToClipboard;
+- (void)copyCookieToClipboard;
 - (void)exportHistory;
 - (void)saveHistorySnapshot:(NSString *)source api:(NSString *)api;
 
@@ -196,6 +201,7 @@ static NSArray *kTargetKeys(void) {
         _lastSource = @"-";
         _lastAPI = @"-";
         _lastURL = @"-";
+        _lastCookie = @"-";
         _historyRecords = [NSMutableArray array];
         // 延迟创建窗口，确保 UIApplication 已就绪
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
@@ -256,7 +262,7 @@ static NSArray *kTargetKeys(void) {
     [self.window addSubview:self.containerView];
 
     // ---- Header ----
-    CGFloat headerH = 88;
+    CGFloat headerH = 104;
     self.headerView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, windowW, headerH)];
     self.headerView.backgroundColor = [UIColor colorWithRed:0.12 green:0.12 blue:0.16 alpha:1.0];
     [self.containerView addSubview:self.headerView];
@@ -313,6 +319,16 @@ static NSArray *kTargetKeys(void) {
     self.urlLabel.minimumScaleFactor = 0.5;
     self.urlLabel.numberOfLines = 1;
     [self.headerView addSubview:self.urlLabel];
+
+    // Cookie line
+    self.cookieLabel = [[UILabel alloc] initWithFrame:CGRectMake(12, 84, windowW - 24, 16)];
+    self.cookieLabel.text = @"Cookie: -";
+    self.cookieLabel.textColor = [UIColor colorWithRed:0.9 green:0.7 blue:0.4 alpha:1.0];
+    self.cookieLabel.font = [UIFont fontWithName:@"Menlo" size:9];
+    self.cookieLabel.adjustsFontSizeToFitWidth = YES;
+    self.cookieLabel.minimumScaleFactor = 0.5;
+    self.cookieLabel.numberOfLines = 1;
+    [self.headerView addSubview:self.cookieLabel];
 
     // ---- ScrollView for fields ----
     CGFloat scrollY = headerH;
@@ -378,21 +394,32 @@ static NSArray *kTargetKeys(void) {
 
     // Copy All button (current snapshot)
     self.exportBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    self.exportBtn.frame = CGRectMake(8, 6, 100, 28);
+    self.exportBtn.frame = CGRectMake(8, 6, 72, 28);
     [self.exportBtn setTitle:@"📋 Copy" forState:UIControlStateNormal];
     [self.exportBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    self.exportBtn.titleLabel.font = [UIFont systemFontOfSize:11];
+    self.exportBtn.titleLabel.font = [UIFont systemFontOfSize:10];
     self.exportBtn.backgroundColor = [UIColor colorWithRed:0.15 green:0.4 blue:0.8 alpha:0.8];
     self.exportBtn.layer.cornerRadius = 6;
     [self.exportBtn addTarget:self action:@selector(copyAllToClipboard) forControlEvents:UIControlEventTouchUpInside];
     [self.footerView addSubview:self.exportBtn];
 
+    // Copy Cookie button
+    self.cookieCopyBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    self.cookieCopyBtn.frame = CGRectMake(84, 6, 72, 28);
+    [self.cookieCopyBtn setTitle:@"🍪 Cookie" forState:UIControlStateNormal];
+    [self.cookieCopyBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    self.cookieCopyBtn.titleLabel.font = [UIFont systemFontOfSize:10];
+    self.cookieCopyBtn.backgroundColor = [UIColor colorWithRed:0.7 green:0.5 blue:0.2 alpha:0.8];
+    self.cookieCopyBtn.layer.cornerRadius = 6;
+    [self.cookieCopyBtn addTarget:self action:@selector(copyCookieToClipboard) forControlEvents:UIControlEventTouchUpInside];
+    [self.footerView addSubview:self.cookieCopyBtn];
+
     // Export History button
     self.historyBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    self.historyBtn.frame = CGRectMake(114, 6, 100, 28);
+    self.historyBtn.frame = CGRectMake(160, 6, 72, 28);
     [self.historyBtn setTitle:@"📤 Export" forState:UIControlStateNormal];
     [self.historyBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    self.historyBtn.titleLabel.font = [UIFont systemFontOfSize:11];
+    self.historyBtn.titleLabel.font = [UIFont systemFontOfSize:10];
     self.historyBtn.backgroundColor = [UIColor colorWithRed:0.2 green:0.55 blue:0.3 alpha:0.8];
     self.historyBtn.layer.cornerRadius = 6;
     [self.historyBtn addTarget:self action:@selector(exportHistory) forControlEvents:UIControlEventTouchUpInside];
@@ -400,10 +427,10 @@ static NSArray *kTargetKeys(void) {
 
     // Clear button
     self.clearButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    self.clearButton.frame = CGRectMake(windowW - 92, 6, 80, 28);
+    self.clearButton.frame = CGRectMake(windowW - 80, 6, 72, 28);
     [self.clearButton setTitle:@"🗑 Clear" forState:UIControlStateNormal];
     [self.clearButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    self.clearButton.titleLabel.font = [UIFont systemFontOfSize:11];
+    self.clearButton.titleLabel.font = [UIFont systemFontOfSize:10];
     self.clearButton.backgroundColor = [UIColor colorWithRed:0.6 green:0.2 blue:0.2 alpha:0.8];
     self.clearButton.layer.cornerRadius = 6;
     [self.clearButton addTarget:self action:@selector(clearAll) forControlEvents:UIControlEventTouchUpInside];
@@ -489,7 +516,7 @@ static NSArray *kTargetKeys(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         self.collapsed = !self.collapsed;
         CGFloat fullH = 380;
-        CGFloat headerH = 88;
+        CGFloat headerH = 104;
         CGFloat targetH = self.collapsed ? headerH : fullH;
         CGFloat currentW = self.window.frame.size.width;
         CGFloat currentX = self.window.frame.origin.x;
@@ -505,6 +532,7 @@ static NSArray *kTargetKeys(void) {
             self.containerView.frame = CGRectMake(0, 0, currentW, targetH);
             self.scrollView.hidden = self.collapsed;
             self.footerView.hidden = self.collapsed;
+            self.cookieLabel.hidden = self.collapsed;
             [self.collapseBtn setTitle:self.collapsed ? @"▼" : @"▲" forState:UIControlStateNormal];
         } completion:nil];
     });
@@ -519,6 +547,18 @@ static NSArray *kTargetKeys(void) {
             display = [NSString stringWithFormat:@"%@...", [display substringToIndex:60]];
         }
         self.urlLabel.text = [NSString stringWithFormat:@"URL: %@", display];
+    });
+}
+
+- (void)updateCookie:(NSString *)cookie {
+    if (!cookie || cookie.length == 0) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        self.lastCookie = cookie;
+        NSString *display = cookie;
+        if (display.length > 50) {
+            display = [NSString stringWithFormat:@"%@...", [display substringToIndex:50]];
+        }
+        self.cookieLabel.text = [NSString stringWithFormat:@"Cookie: %@", display];
     });
 }
 
@@ -593,6 +633,7 @@ static NSArray *kTargetKeys(void) {
     snapshot[@"_source"] = source ?: @"-";
     snapshot[@"_api"] = api ?: self.lastAPI ?: @"-";
     snapshot[@"_url"] = self.lastURL ?: @"-";
+    snapshot[@"_cookie"] = self.lastCookie ?: @"-";
     snapshot[@"_timestamp"] = [self.lastUpdate description] ?: @"-";
     snapshot[@"_index"] = @(self.historyRecords.count + 1);
     
@@ -652,6 +693,7 @@ static NSArray *kTargetKeys(void) {
     json[@"_lastSource"] = self.lastSource;
     json[@"_lastAPI"] = self.lastAPI;
     json[@"_lastURL"] = self.lastURL;
+    json[@"_lastCookie"] = self.lastCookie;
     json[@"_lastUpdate"] = self.lastUpdate ? [self.lastUpdate description] : @"-";
 
     NSData *data = [NSJSONSerialization dataWithJSONObject:json options:NSJSONWritingPrettyPrinted error:nil];
@@ -659,6 +701,16 @@ static NSArray *kTargetKeys(void) {
     UIPasteboard.generalPasteboard.string = jsonStr;
 
     [self showToast:@"Current snapshot copied!"];
+}
+
+- (void)copyCookieToClipboard {
+    NSString *cookie = self.lastCookie ?: @"-";
+    if ([cookie isEqualToString:@"-"] || cookie.length == 0) {
+        [self showToast:@"No cookie captured!"];
+        return;
+    }
+    UIPasteboard.generalPasteboard.string = cookie;
+    [self showToast:@"Cookie copied!"];
 }
 
 - (void)exportHistory {
@@ -694,9 +746,11 @@ static NSArray *kTargetKeys(void) {
     self.lastAPI = @"-";
     self.lastSource = @"-";
     self.lastURL = @"-";
+    self.lastCookie = @"-";
     self.lastUpdate = nil;
     [self.historyRecords removeAllObjects];
     self.urlLabel.text = @"URL: -";
+    self.cookieLabel.text = @"Cookie: -";
     [self updateStatusBar];
     [self showToast:@"Cleared!"];
 }
@@ -846,8 +900,24 @@ static NSArray *kTargetKeys(void) {
         [[FloatWindowManager sharedInstance] updateURL:url.absoluteString];
     }
 
+    // 捕获请求 Cookie
+    NSDictionary *headers = request.allHTTPHeaderFields;
+    NSString *cookieHeader = headers[@"Cookie"] ?: headers[@"cookie"];
+    if (cookieHeader && cookieHeader.length > 0) {
+        [[FloatWindowManager sharedInstance] updateCookie:cookieHeader];
+    }
+
     // ---- 包装 completionHandler 拦截响应 ----
     void (^wrappedHandler)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *response, NSError *error) {
+        // 捕获响应中的 Set-Cookie
+        if ([response isKindOfClass:[NSHTTPURLResponse class]]) {
+            NSHTTPURLResponse *httpResp = (NSHTTPURLResponse *)response;
+            NSDictionary *respHeaders = httpResp.allHeaderFields;
+            NSString *setCookie = respHeaders[@"Set-Cookie"] ?: respHeaders[@"set-cookie"];
+            if (setCookie && setCookie.length > 0) {
+                [[FloatWindowManager sharedInstance] updateCookie:setCookie];
+            }
+        }
         if (data && data.length > 0) {
             @try {
                 NSMutableDictionary *respResults = [NSMutableDictionary dictionary];
@@ -906,6 +976,25 @@ static NSArray *kTargetKeys(void) {
 
 %end
 
+// --- Hook 5: NSHTTPCookieStorage (拦截 Cookie 读取) ---
+%hook NSHTTPCookieStorage
+
+- (NSArray *)cookiesForURL:(NSURL *)URL {
+    NSArray *cookies = %orig;
+    if (cookies && cookies.count > 0 && URL) {
+        NSMutableString *cookieStr = [NSMutableString string];
+        for (NSHTTPCookie *cookie in cookies) {
+            if (cookieStr.length > 0) [cookieStr appendString:@"; "];
+            [cookieStr appendFormat:@"%@=%@", cookie.name, cookie.value];
+        }
+        if (cookieStr.length > 0) {
+            [[FloatWindowManager sharedInstance] updateCookie:cookieStr];
+        }
+    }
+    return cookies;
+}
+
+%end
 // --- Hook 4: NSMutableDictionary setObject:forKey: (拦截字典写入) ---
 // 仅 hook NSMutableDictionary 而非 NSDictionary，避免性能问题
 %hook NSMutableDictionary
@@ -936,7 +1025,7 @@ static NSArray *kTargetKeys(void) {
 %ctor {
     NSLog(@"[ElemeFieldMonitor] ============================================");
     NSLog(@"[ElemeFieldMonitor] Tweak loaded into me.ele.ios.eleme");
-    NSLog(@"[ElemeFieldMonitor] Monitoring: encryptSceneCode, encryptActCode, rightId, sourceFrom, sceneCode, actCode");
+    NSLog(@"[ElemeFieldMonitor] Monitoring: encryptSceneCode, encryptActCode, rightId, sourceFrom, sceneCode, actCode + Cookie");
     NSLog(@"[ElemeFieldMonitor] ============================================");
 
     // 初始化悬浮窗管理器 (触发 dispatch_once 创建实例)
