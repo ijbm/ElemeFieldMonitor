@@ -325,7 +325,12 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
         _pendingRequests = [NSMutableArray array];
         _harEntries = [NSMutableArray array];
         _cryptoRecords = [NSMutableArray array];
-        g_cryptoReady = YES;
+        // 延迟 3 秒启用 crypto hook，确保 app 完全启动后再捕获
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            g_cryptoReady = YES;
+            NSLog(@"[ElemeFieldMonitor] Crypto hooks activated");
+        });
         // 延迟创建窗口，确保 UIApplication 已就绪
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
@@ -2753,8 +2758,9 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
 %end
 
 // ============================================================================
-// MARK: - Crypto Hooks (哈希/HMAC/加解密)
+// MARK: - Crypto Hooks (哈希/HMAC/加解密) - 暂时禁用排查闪退
 // ============================================================================
+#if 0  // CRYPTO_HOOKS_DISABLED
 
 // 辅助函数: NSData -> hex 字符串 (限制最大 1024 字节)
 static NSString *dataToHex(NSData *data) {
@@ -3019,6 +3025,8 @@ static NSMutableDictionary *g_hmacContexts = nil;
     }
     return status;
 }
+
+#endif  // CRYPTO_HOOKS_DISABLED
 
 // ============================================================================
 // MARK: - 构造函数
