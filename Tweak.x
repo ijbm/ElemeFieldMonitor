@@ -322,6 +322,7 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
         _pendingRequests = [NSMutableArray array];
         _harEntries = [NSMutableArray array];
         _cryptoRecords = [NSMutableArray array];
+        g_cryptoReady = YES;
         // 延迟创建窗口，确保 UIApplication 已就绪
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
@@ -1985,27 +1986,44 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
 
 - (void)recordCryptoOperation:(NSString *)algorithm type:(NSString *)type input:(NSString *)input output:(NSString *)output key:(NSString *)key iv:(NSString *)iv {
     if (!algorithm || algorithm.length == 0) return;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        NSMutableDictionary *rec = [NSMutableDictionary dictionary];
-        rec[@"algorithm"] = algorithm;
-        rec[@"type"] = type ?: @"unknown";
-        rec[@"input"] = input ?: @"";
-        rec[@"output"] = output ?: @"";
-        rec[@"key"] = key ?: @"";
-        rec[@"iv"] = iv ?: @"";
-        // 时间戳
-        NSDateFormatter *isoFmt = [[NSDateFormatter alloc] init];
-        isoFmt.dateFormat = @"yyyy-MM-dd'T'HH:mm:ss.SSS'Z'";
-        isoFmt.timeZone = [NSTimeZone timeZoneWithAbbreviation:@"UTC"];
-        isoFmt.locale = [[NSLocale alloc] initWithLocaleIdentifier:@"en_US_POSIX"];
-        rec[@"timestamp"] = [isoFmt stringFromDate:[NSDate date]];
-        [self.cryptoRecords addObject:rec];
-        NSLog(@"[ElemeFieldMonitor] Crypto op #%ld: %@ (%@)", (long)self.cryptoRecords.count, algorithm, type);
-        [self updateStatusBar];
-        if (self.activeTab == 2) {
-            [self refreshCryptoList];
-        }
-    });
+    // 截断超长字符串
+    if (input.length > 2048) input = [NSString stringWithFormat:@"%@...", [input substringToIndex:2048]];
+    if (output.length > 2048) output = [NSString stringWithFormat:@"%@...", [output substringToIndex:2048]];
+    if (key.length > 256) key = [NSString stringWithFormat:@"%@...", [key substringToIndex:256]];
+    if (iv.length > 256) iv = [NSString stringWithFormat:@"%@...", [iv substringToIndex:256]];
+    
+    void (^recordBlock)(void) = ^{
+        @try {
+            // 记录上限 500 条，超出删除最旧的
+            if (self.cryptoRecords.count >= 500) {
+                [self.cryptoRecords removeObjectAtIndex:0];
+            }
+            NSMutableDictionary *rec = [NSMutableDictionary dictionary];
+            rec[@"algorithm"] = algorithm;
+            rec[@"type"] = type ?: @"unknown";
+            rec[@"input"] = input ?: @"";
+            rec[@"output"] = output ?: @"";
+            rec[@"key"] = key ?: @"";
+            rec[@"iv"] = iv ?: @"";
+            // 时间戳
+            NSDateFormatter *isoFmt = [[NSDateFormatter alloc] init];
+            isoFmt.dateFormat = @"yyyy-MM-dd'T'HH:mm:ss.SSS'Z'";
+            isoFmt.timeZone = [NSTimeZone timeZoneWithAbbreviation:@"UTC"];
+            isoFmt.locale = [[NSLocale alloc] initWithLocaleIdentifier:@"en_US_POSIX"];
+            rec[@"timestamp"] = [isoFmt stringFromDate:[NSDate date]];
+            [self.cryptoRecords addObject:rec];
+            // 仅在 Crypto tab 活跃时刷新 UI，且节流（每5条或前10条刷新一次）
+            if (self.activeTab == 2 && (self.cryptoRecords.count % 5 == 0 || self.cryptoRecords.count < 10)) {
+                [self refreshCryptoList];
+            }
+        } @catch (NSException *e) {}
+    };
+    
+    if ([NSThread isMainThread]) {
+        recordBlock();
+    } else {
+        dispatch_async(dispatch_get_main_queue(), recordBlock);
+    }
 }
 
 - (void)refreshCryptoList {
@@ -2735,29 +2753,37 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
 // MARK: - Crypto Hooks (哈希/HMAC/加解密)
 // ============================================================================
 
-// 辅助函数: NSData -> hex 字符串
+// 安全标志: FloatWindowManager 初始化完成后才记录
+static volatile BOOL g_cryptoReady = NO;
+
+// 辅助函数: NSData -> hex 字符串 (限制最大 1024 字节)
 static NSString *dataToHex(NSData *data) {
     if (!data || data.length == 0) return @"";
+    NSUInteger limit = MIN(data.length, 1024);
     const unsigned char *bytes = (const unsigned char *)data.bytes;
-    NSMutableString *hex = [NSMutableString stringWithCapacity:data.length * 2];
-    for (NSUInteger i = 0; i < data.length; i++) {
+    NSMutableString *hex = [NSMutableString stringWithCapacity:limit * 2];
+    for (NSUInteger i = 0; i < limit; i++) {
         [hex appendFormat:@"%02x", bytes[i]];
     }
+    if (data.length > limit) [hex appendString:@"..."];
     return hex;
 }
 
-// 辅助函数: 尝试将 NSData 转为可读字符串
+// 辅助函数: 尝试将 NSData 转为可读字符串 (限制最大 1024 字节)
 static NSString *dataToString(NSData *data) {
     if (!data || data.length == 0) return @"";
     NSString *str = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-    if (str) return str;
+    if (str) {
+        if (str.length > 1024) return [NSString stringWithFormat:@"%@...", [str substringToIndex:1024]];
+        return str;
+    }
     return dataToHex(data);
 }
 
 // --- Hook: CC_MD5 ---
 %hookf(unsigned char *, CC_MD5, const void *data, CC_LONG len, unsigned char *md) {
     unsigned char *result = %orig;
-    if (result && len > 0) {
+    if (g_cryptoReady && result && data && len > 0) {
         @try {
             NSData *inputData = [NSData dataWithBytes:data length:len];
             NSData *outputData = [NSData dataWithBytes:result length:CC_MD5_DIGEST_LENGTH];
@@ -2777,7 +2803,7 @@ static NSString *dataToString(NSData *data) {
 // --- Hook: CC_SHA1 ---
 %hookf(unsigned char *, CC_SHA1, const void *data, CC_LONG len, unsigned char *md) {
     unsigned char *result = %orig;
-    if (result && len > 0) {
+    if (g_cryptoReady && result && data && len > 0) {
         @try {
             NSData *inputData = [NSData dataWithBytes:data length:len];
             NSData *outputData = [NSData dataWithBytes:result length:CC_SHA1_DIGEST_LENGTH];
@@ -2797,7 +2823,7 @@ static NSString *dataToString(NSData *data) {
 // --- Hook: CC_SHA256 ---
 %hookf(unsigned char *, CC_SHA256, const void *data, CC_LONG len, unsigned char *md) {
     unsigned char *result = %orig;
-    if (result && len > 0) {
+    if (g_cryptoReady && result && data && len > 0) {
         @try {
             NSData *inputData = [NSData dataWithBytes:data length:len];
             NSData *outputData = [NSData dataWithBytes:result length:CC_SHA256_DIGEST_LENGTH];
@@ -2817,7 +2843,7 @@ static NSString *dataToString(NSData *data) {
 // --- Hook: CC_SHA512 ---
 %hookf(unsigned char *, CC_SHA512, const void *data, CC_LONG len, unsigned char *md) {
     unsigned char *result = %orig;
-    if (result && len > 0) {
+    if (g_cryptoReady && result && data && len > 0) {
         @try {
             NSData *inputData = [NSData dataWithBytes:data length:len];
             NSData *outputData = [NSData dataWithBytes:result length:CC_SHA512_DIGEST_LENGTH];
@@ -2837,7 +2863,7 @@ static NSString *dataToString(NSData *data) {
 // --- Hook: CC_SHA224 ---
 %hookf(unsigned char *, CC_SHA224, const void *data, CC_LONG len, unsigned char *md) {
     unsigned char *result = %orig;
-    if (result && len > 0) {
+    if (g_cryptoReady && result && data && len > 0) {
         @try {
             NSData *inputData = [NSData dataWithBytes:data length:len];
             NSData *outputData = [NSData dataWithBytes:result length:CC_SHA224_DIGEST_LENGTH];
@@ -2857,7 +2883,7 @@ static NSString *dataToString(NSData *data) {
 // --- Hook: CC_SHA384 ---
 %hookf(unsigned char *, CC_SHA384, const void *data, CC_LONG len, unsigned char *md) {
     unsigned char *result = %orig;
-    if (result && len > 0) {
+    if (g_cryptoReady && result && data && len > 0) {
         @try {
             NSData *inputData = [NSData dataWithBytes:data length:len];
             NSData *outputData = [NSData dataWithBytes:result length:CC_SHA384_DIGEST_LENGTH];
@@ -2880,7 +2906,7 @@ static NSMutableDictionary *g_hmacContexts = nil;
 
 %hookf(void, CCHmacInit, CCHmacContext *ctx, CCHmacAlgorithm algorithm, const void *key, size_t keyLength) {
     %orig;
-    if (ctx) {
+    if (g_cryptoReady && ctx) {
         @try {
             NSString *algoName = @"UnknownHMAC";
             switch (algorithm) {
@@ -2891,8 +2917,11 @@ static NSMutableDictionary *g_hmacContexts = nil;
                 case kCCHmacAlgSHA512: algoName = @"HMAC-SHA512"; break;
                 case kCCHmacAlgSHA224: algoName = @"HMAC-SHA224"; break;
             }
-            NSData *keyData = [NSData dataWithBytes:key length:keyLength];
-            NSString *keyStr = dataToString(keyData);
+            NSString *keyStr = @"";
+            if (key && keyLength > 0) {
+                NSData *keyData = [NSData dataWithBytes:key length:keyLength];
+                keyStr = dataToString(keyData);
+            }
             if (!g_hmacContexts) g_hmacContexts = [NSMutableDictionary dictionary];
             NSString *ctxKey = [NSString stringWithFormat:@"%p", ctx];
             @synchronized(g_hmacContexts) {
@@ -2904,7 +2933,7 @@ static NSMutableDictionary *g_hmacContexts = nil;
 
 %hookf(void, CCHmacFinal, CCHmacContext *ctx, void *macOut) {
     %orig;
-    if (ctx && macOut) {
+    if (g_cryptoReady && ctx && macOut) {
         @try {
             NSString *ctxKey = [NSString stringWithFormat:@"%p", ctx];
             NSDictionary *ctxInfo = nil;
@@ -2941,7 +2970,7 @@ static NSMutableDictionary *g_hmacContexts = nil;
 // --- Hook: CCCrypt (AES/DES/3DES/RC4/RC2/Blowfish) ---
 %hookf(CCCryptorStatus, CCCrypt, CCOperation op, CCAlgorithm alg, CCOptions options, const void *key, size_t keyLength, const void *iv, size_t ivLength, const void *dataIn, size_t dataInLength, void *dataOut, size_t dataOutAvailable, size_t *dataOutMoved) {
     CCCryptorStatus status = %orig;
-    if (status == kCCSuccess) {
+    if (g_cryptoReady && status == kCCSuccess) {
         @try {
             // 算法名
             NSString *algoName = @"Unknown";
