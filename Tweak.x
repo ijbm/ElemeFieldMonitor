@@ -57,6 +57,33 @@ static BOOL isTargetAPI(NSString *api) {
     return NO;
 }
 
+// 从 URL 中提取 API 名称
+static NSString *extractAPIFromURL(NSURL *url) {
+    if (!url) return nil;
+    NSString *path = url.absoluteString;
+    for (NSString *target in kTargetAPIs()) {
+        if ([path containsString:target]) return target;
+    }
+    // 也检查通用 mtop. 模式
+    NSRange mtopRange = [path rangeOfString:@"mtop."];
+    if (mtopRange.location != NSNotFound) {
+        NSString *apiPart = [path substringFromIndex:mtopRange.location];
+        NSRange endRange = [apiPart rangeOfString:@"[&/?]" options:NSRegularExpressionSearch];
+        if (endRange.location != NSNotFound) {
+            return [apiPart substringToIndex:endRange.location];
+        }
+        return apiPart;
+    }
+    return nil;
+}
+
+// 缓存最近的 URL，用于关联 MTOP 请求
+static NSString *g_lastURL = nil;
+static NSString *g_lastMethod = nil;
+static NSDictionary *g_lastHeaders = nil;
+
+// captureRequestIfNeeded 函数声明在 FloatWindowManager 接口之后
+
 // ============================================================================
 // MARK: - 字段搜索工具
 // ============================================================================
@@ -160,7 +187,14 @@ static BOOL isTargetAPI(NSString *api) {
 @property (nonatomic, strong) UIView *containerView;
 @property (nonatomic, strong) UIView *headerView;
 @property (nonatomic, strong) UIView *footerView;
-@property (nonatomic, strong) UIScrollView *scrollView;
+@property (nonatomic, strong) UIView *tabBarView;
+@property (nonatomic, strong) UIScrollView *fieldsScrollView;
+@property (nonatomic, strong) UIScrollView *harScrollView;
+@property (nonatomic, strong) UIButton *tabFieldsBtn;
+@property (nonatomic, strong) UIButton *tabHarBtn;
+@property (nonatomic, strong) UIView *tabFieldsIndicator;
+@property (nonatomic, strong) UIView *tabHarIndicator;
+@property (nonatomic, assign) NSInteger activeTab; // 0=fields, 1=har
 
 @property (nonatomic, strong) UILabel *titleLabel;
 @property (nonatomic, strong) UILabel *statusLabel;
@@ -179,16 +213,15 @@ static BOOL isTargetAPI(NSString *api) {
 @property (nonatomic, strong) UIButton *exportBtn;
 @property (nonatomic, strong) UIButton *clearButton;
 @property (nonatomic, strong) UIButton *collapseBtn;
-@property (nonatomic, strong) UIButton *historyBtn;
-@property (nonatomic, strong) UIButton *apiExportBtn;
+@property (nonatomic, strong) UIButton *harExportBtn;
 @property (nonatomic, strong) UIButton *cookieCopyBtn;
 @property (nonatomic, strong) UILabel *urlLabel;
 @property (nonatomic, strong) UILabel *cookieLabel;
 @property (nonatomic, strong) NSString *lastURL;
 @property (nonatomic, strong) NSString *lastCookie;
 @property (nonatomic, assign) BOOL collapsed;
-@property (nonatomic, strong) NSMutableArray *historyRecords;
-@property (nonatomic, strong) NSMutableArray *apiRecords;
+@property (nonatomic, strong) NSMutableDictionary *pendingRequests;
+@property (nonatomic, strong) NSMutableArray *harEntries;
 
 + (instancetype)sharedInstance;
 - (void)show;
@@ -200,13 +233,51 @@ static BOOL isTargetAPI(NSString *api) {
 - (void)updateCookie:(NSString *)cookie;
 - (void)copyAllToClipboard;
 - (void)copyCookieToClipboard;
-- (void)exportHistory;
-- (void)exportAPIRecords;
-- (void)saveHistorySnapshot:(NSString *)source api:(NSString *)api;
+- (void)exportHAR;
 - (void)recordAPIRequest:(NSString *)api url:(NSString *)url method:(NSString *)method headers:(NSDictionary *)headers body:(NSString *)body;
 - (void)recordAPIResponse:(NSString *)api response:(NSString *)response statusCode:(NSInteger)code;
+- (void)switchTab:(NSInteger)tabIndex;
+- (void)refreshHarList;
+- (void)tabFieldsTapped;
+- (void)tabHarTapped;
+- (void)clearHar;
 
 @end
+
+// 从请求中提取完整信息并记录（需要在 FloatWindowManager 接口声明之后）
+static void captureRequestIfNeeded(NSURLRequest *request) {
+    if (!request) return;
+    NSURL *url = request.URL;
+    NSString *api = extractAPIFromURL(url);
+    
+    // 也从 body 提取 API
+    if (!api) {
+        NSData *body = request.HTTPBody;
+        if (body && body.length > 0) {
+            @try {
+                id bodyJson = [NSJSONSerialization JSONObjectWithData:body options:NSJSONReadingAllowFragments error:nil];
+                if ([bodyJson isKindOfClass:[NSDictionary class]]) {
+                    api = bodyJson[@"api"] ?: bodyJson[@"apiName"];
+                }
+            } @catch (NSException *e) {}
+        }
+    }
+    
+    if (!api || api.length == 0) return;
+    
+    NSString *bodyStr = @"-";
+    NSData *body = request.HTTPBody;
+    if (body) {
+        bodyStr = [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding] ?: @"-";
+    }
+    
+    [[FloatWindowManager sharedInstance] recordAPIRequest:api
+                                                      url:url.absoluteString
+                                                   method:request.HTTPMethod ?: @"GET"
+                                                  headers:request.allHTTPHeaderFields ?: @{}
+                                                     body:bodyStr];
+    NSLog(@"[ElemeFieldMonitor] Target API request captured: %@", api);
+}
 
 @implementation FloatWindowManager
 
@@ -230,8 +301,8 @@ static BOOL isTargetAPI(NSString *api) {
         _lastAPI = @"-";
         _lastURL = @"-";
         _lastCookie = @"-";
-        _historyRecords = [NSMutableArray array];
-        _apiRecords = [NSMutableArray array];
+        _pendingRequests = [NSMutableDictionary dictionary];
+        _harEntries = [NSMutableArray array];
         // 延迟创建窗口，确保 UIApplication 已就绪
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
@@ -270,9 +341,10 @@ static BOOL isTargetAPI(NSString *api) {
     }
 
     CGFloat windowW = 360;
-    CGFloat windowH = 380;
+    CGFloat windowH = 460;
     CGFloat startX = 10;
-    CGFloat startY = 120;
+    CGFloat startY = 100;
+    CGFloat sidePad = 10;
 
     self.window = [[UIWindow alloc] initWithWindowScene:scene];
     self.window.frame = CGRectMake(startX, startY, windowW, windowH);
@@ -283,210 +355,391 @@ static BOOL isTargetAPI(NSString *api) {
 
     // 容器视图
     self.containerView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, windowW, windowH)];
-    self.containerView.backgroundColor = [UIColor colorWithRed:0.08 green:0.08 blue:0.10 alpha:0.95];
-    self.containerView.layer.cornerRadius = 14;
+    self.containerView.backgroundColor = [UIColor colorWithRed:0.06 green:0.06 blue:0.08 alpha:0.96];
+    self.containerView.layer.cornerRadius = 16;
     self.containerView.layer.masksToBounds = YES;
-    self.containerView.layer.borderWidth = 1.5;
-    self.containerView.layer.borderColor = [UIColor colorWithRed:0.2 green:0.5 blue:0.9 alpha:0.7].CGColor;
+    self.containerView.layer.borderWidth = 1;
+    self.containerView.layer.borderColor = [UIColor colorWithRed:0.15 green:0.15 blue:0.18 alpha:0.8].CGColor;
     [self.window addSubview:self.containerView];
 
-    // ---- Header ----
-    CGFloat headerH = 104;
+    // 色板
+    UIColor *titleColor = [UIColor colorWithRed:0.25 green:0.60 blue:1.0 alpha:1.0];
+    UIColor *statusColor = [UIColor colorWithRed:0.55 green:0.55 blue:0.60 alpha:1.0];
+    UIColor *apiColor = [UIColor colorWithRed:0.40 green:0.78 blue:0.47 alpha:1.0];
+    UIColor *urlColor = [UIColor colorWithRed:0.55 green:0.65 blue:0.90 alpha:1.0];
+    UIColor *cookieColor = [UIColor colorWithRed:0.90 green:0.70 blue:0.35 alpha:1.0];
+    UIColor *cardBg = [UIColor colorWithRed:0.10 green:0.10 blue:0.13 alpha:0.85];
+    UIColor *keyColor = [UIColor colorWithRed:0.50 green:0.58 blue:0.65 alpha:1.0];
+    UIColor *notFoundColor = [UIColor colorWithRed:0.35 green:0.35 blue:0.38 alpha:1.0];
+    UIColor *tabActiveColor = [UIColor colorWithRed:0.25 green:0.60 blue:1.0 alpha:1.0];
+    UIColor *tabInactiveColor = [UIColor colorWithRed:0.45 green:0.45 blue:0.50 alpha:1.0];
+    UIColor *dividerColor = [UIColor colorWithRed:0.18 green:0.18 blue:0.22 alpha:1.0];
+
+    // ---- Header (56px) ----
+    CGFloat headerH = 56;
     self.headerView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, windowW, headerH)];
-    self.headerView.backgroundColor = [UIColor colorWithRed:0.12 green:0.12 blue:0.16 alpha:1.0];
+    self.headerView.backgroundColor = [UIColor colorWithRed:0.09 green:0.09 blue:0.12 alpha:1.0];
     [self.containerView addSubview:self.headerView];
 
-    // Title
-    self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(12, 6, 260, 22)];
-    self.titleLabel.text = @"🔑 Eleme Field Monitor";
-    self.titleLabel.textColor = [UIColor colorWithRed:0.3 green:0.6 blue:1.0 alpha:1.0];
-    self.titleLabel.font = [UIFont boldSystemFontOfSize:15];
+    UIView *headerDivider = [[UIView alloc] initWithFrame:CGRectMake(0, headerH - 1, windowW, 1)];
+    headerDivider.backgroundColor = dividerColor;
+    [self.headerView addSubview:headerDivider];
+
+    self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(14, 4, 230, 20)];
+    self.titleLabel.text = @"Eleme Field Monitor";
+    self.titleLabel.textColor = titleColor;
+    self.titleLabel.font = [UIFont boldSystemFontOfSize:13];
     [self.headerView addSubview:self.titleLabel];
 
-    // Collapse button
     self.collapseBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    self.collapseBtn.frame = CGRectMake(windowW - 66, 6, 28, 22);
+    self.collapseBtn.frame = CGRectMake(windowW - 60, 3, 24, 20);
     [self.collapseBtn setTitle:@"▲" forState:UIControlStateNormal];
-    [self.collapseBtn setTitleColor:[UIColor colorWithRed:0.6 green:0.8 blue:1.0 alpha:1.0]
-                          forState:UIControlStateNormal];
-    self.collapseBtn.titleLabel.font = [UIFont boldSystemFontOfSize:14];
+    [self.collapseBtn setTitleColor:[UIColor colorWithRed:0.55 green:0.65 blue:0.80 alpha:1.0] forState:UIControlStateNormal];
+    self.collapseBtn.titleLabel.font = [UIFont boldSystemFontOfSize:12];
     [self.collapseBtn addTarget:self action:@selector(toggleCollapse) forControlEvents:UIControlEventTouchUpInside];
     [self.headerView addSubview:self.collapseBtn];
 
-    // Close button
     self.closeButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    self.closeButton.frame = CGRectMake(windowW - 36, 6, 28, 22);
+    self.closeButton.frame = CGRectMake(windowW - 34, 3, 24, 20);
     [self.closeButton setTitle:@"✕" forState:UIControlStateNormal];
-    [self.closeButton setTitleColor:[UIColor colorWithRed:1.0 green:0.3 blue:0.3 alpha:1.0]
-                          forState:UIControlStateNormal];
-    self.closeButton.titleLabel.font = [UIFont boldSystemFontOfSize:16];
+    [self.closeButton setTitleColor:[UIColor colorWithRed:0.9 green:0.3 blue:0.3 alpha:1.0] forState:UIControlStateNormal];
+    self.closeButton.titleLabel.font = [UIFont boldSystemFontOfSize:14];
     [self.closeButton addTarget:self action:@selector(hide) forControlEvents:UIControlEventTouchUpInside];
     [self.headerView addSubview:self.closeButton];
 
-    // Status line
-    self.statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(12, 30, windowW - 24, 16)];
-    self.statusLabel.text = @"Count: 0 | Source: - | --:--:--";
-    self.statusLabel.textColor = [UIColor colorWithRed:0.6 green:0.6 blue:0.65 alpha:1.0];
-    self.statusLabel.font = [UIFont systemFontOfSize:11];
+    self.statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(14, 24, windowW - 28, 14)];
+    self.statusLabel.text = @"Count: 0 | HAR: 0 | --:--:--";
+    self.statusLabel.textColor = statusColor;
+    self.statusLabel.font = [UIFont systemFontOfSize:10];
     [self.headerView addSubview:self.statusLabel];
 
-    // API line
-    self.apiLabel = [[UILabel alloc] initWithFrame:CGRectMake(12, 48, windowW - 24, 16)];
+    self.apiLabel = [[UILabel alloc] initWithFrame:CGRectMake(14, 39, windowW - 28, 14)];
     self.apiLabel.text = @"API: -";
-    self.apiLabel.textColor = [UIColor colorWithRed:0.5 green:0.75 blue:0.55 alpha:1.0];
-    self.apiLabel.font = [UIFont fontWithName:@"Menlo" size:10];
+    self.apiLabel.textColor = apiColor;
+    self.apiLabel.font = [UIFont fontWithName:@"Menlo" size:9];
     self.apiLabel.adjustsFontSizeToFitWidth = YES;
-    self.apiLabel.minimumScaleFactor = 0.6;
+    self.apiLabel.minimumScaleFactor = 0.55;
     [self.headerView addSubview:self.apiLabel];
 
-    // URL line
-    self.urlLabel = [[UILabel alloc] initWithFrame:CGRectMake(12, 66, windowW - 24, 16)];
-    self.urlLabel.text = @"URL: -";
-    self.urlLabel.textColor = [UIColor colorWithRed:0.7 green:0.6 blue:0.9 alpha:1.0];
-    self.urlLabel.font = [UIFont fontWithName:@"Menlo" size:9];
+    // ---- TabBar (32px) ----
+    CGFloat tabH = 32;
+    CGFloat tabY = headerH;
+    self.tabBarView = [[UIView alloc] initWithFrame:CGRectMake(0, tabY, windowW, tabH)];
+    self.tabBarView.backgroundColor = [UIColor colorWithRed:0.08 green:0.08 blue:0.10 alpha:1.0];
+    [self.containerView addSubview:self.tabBarView];
+
+    UIView *tabDivider = [[UIView alloc] initWithFrame:CGRectMake(0, tabH - 1, windowW, 1)];
+    tabDivider.backgroundColor = dividerColor;
+    [self.tabBarView addSubview:tabDivider];
+
+    CGFloat tabW = windowW / 2;
+    self.tabFieldsBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    self.tabFieldsBtn.frame = CGRectMake(0, 0, tabW, tabH);
+    [self.tabFieldsBtn setTitle:@"Fields" forState:UIControlStateNormal];
+    [self.tabFieldsBtn setTitleColor:tabActiveColor forState:UIControlStateNormal];
+    self.tabFieldsBtn.titleLabel.font = [UIFont boldSystemFontOfSize:12];
+    [self.tabFieldsBtn addTarget:self action:@selector(tabFieldsTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.tabBarView addSubview:self.tabFieldsBtn];
+
+    self.tabHarBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    self.tabHarBtn.frame = CGRectMake(tabW, 0, tabW, tabH);
+    [self.tabHarBtn setTitle:@"HAR" forState:UIControlStateNormal];
+    [self.tabHarBtn setTitleColor:tabInactiveColor forState:UIControlStateNormal];
+    self.tabHarBtn.titleLabel.font = [UIFont boldSystemFontOfSize:12];
+    [self.tabHarBtn addTarget:self action:@selector(tabHarTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.tabBarView addSubview:self.tabHarBtn];
+
+    // Tab indicators (底部色条)
+    self.tabFieldsIndicator = [[UIView alloc] initWithFrame:CGRectMake(tabW / 2 - 20, tabH - 3, 40, 3)];
+    self.tabFieldsIndicator.backgroundColor = tabActiveColor;
+    self.tabFieldsIndicator.layer.cornerRadius = 1.5;
+    [self.tabBarView addSubview:self.tabFieldsIndicator];
+
+    self.tabHarIndicator = [[UIView alloc] initWithFrame:CGRectMake(tabW + tabW / 2 - 20, tabH - 3, 40, 3)];
+    self.tabHarIndicator.backgroundColor = tabActiveColor;
+    self.tabHarIndicator.layer.cornerRadius = 1.5;
+    self.tabHarIndicator.alpha = 0;
+    [self.tabBarView addSubview:self.tabHarIndicator];
+
+    // ---- Content area ----
+    CGFloat footerH = 44;
+    CGFloat contentY = headerH + tabH;
+    CGFloat contentH = windowH - headerH - tabH - footerH;
+
+    // === Fields ScrollView ===
+    self.fieldsScrollView = [[UIScrollView alloc] initWithFrame:CGRectMake(0, contentY, windowW, contentH)];
+    self.fieldsScrollView.backgroundColor = [UIColor clearColor];
+    self.fieldsScrollView.showsVerticalScrollIndicator = YES;
+    self.fieldsScrollView.alwaysBounceVertical = YES;
+    [self.containerView addSubview:self.fieldsScrollView];
+
+    // URL & Cookie info cards at top of Fields tab
+    CGFloat cy = 8;
+    CGFloat infoCardH = 28;
+
+    // URL card
+    UIView *urlCard = [[UIView alloc] initWithFrame:CGRectMake(sidePad, cy, windowW - sidePad * 2, infoCardH)];
+    urlCard.backgroundColor = cardBg;
+    urlCard.layer.cornerRadius = 5;
+    urlCard.layer.masksToBounds = YES;
+    [self.fieldsScrollView addSubview:urlCard];
+
+    UIView *urlBar = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 2, infoCardH)];
+    urlBar.backgroundColor = [urlColor colorWithAlphaComponent:0.5];
+    [urlCard addSubview:urlBar];
+
+    UILabel *urlKey = [[UILabel alloc] initWithFrame:CGRectMake(8, 0, 40, infoCardH)];
+    urlKey.text = @"URL";
+    urlKey.textColor = [UIColor colorWithRed:0.45 green:0.55 blue:0.70 alpha:1.0];
+    urlKey.font = [UIFont boldSystemFontOfSize:9];
+    urlKey.textAlignment = NSTextAlignmentLeft;
+    [urlCard addSubview:urlKey];
+
+    self.urlLabel = [[UILabel alloc] initWithFrame:CGRectMake(50, 0, urlCard.bounds.size.width - 56, infoCardH)];
+    self.urlLabel.text = @"-";
+    self.urlLabel.textColor = urlColor;
+    self.urlLabel.font = [UIFont fontWithName:@"Menlo" size:8];
     self.urlLabel.adjustsFontSizeToFitWidth = YES;
-    self.urlLabel.minimumScaleFactor = 0.5;
+    self.urlLabel.minimumScaleFactor = 0.4;
     self.urlLabel.numberOfLines = 1;
-    [self.headerView addSubview:self.urlLabel];
+    [urlCard addSubview:self.urlLabel];
 
-    // Cookie line
-    self.cookieLabel = [[UILabel alloc] initWithFrame:CGRectMake(12, 84, windowW - 24, 16)];
-    self.cookieLabel.text = @"Cookie: -";
-    self.cookieLabel.textColor = [UIColor colorWithRed:0.9 green:0.7 blue:0.4 alpha:1.0];
-    self.cookieLabel.font = [UIFont fontWithName:@"Menlo" size:9];
+    cy += infoCardH + 3;
+
+    // Cookie card
+    UIView *cookieCard = [[UIView alloc] initWithFrame:CGRectMake(sidePad, cy, windowW - sidePad * 2, infoCardH)];
+    cookieCard.backgroundColor = cardBg;
+    cookieCard.layer.cornerRadius = 5;
+    cookieCard.layer.masksToBounds = YES;
+    [self.fieldsScrollView addSubview:cookieCard];
+
+    UIView *cookieBar = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 2, infoCardH)];
+    cookieBar.backgroundColor = [cookieColor colorWithAlphaComponent:0.5];
+    [cookieCard addSubview:cookieBar];
+
+    UILabel *cookieKey = [[UILabel alloc] initWithFrame:CGRectMake(8, 0, 44, infoCardH)];
+    cookieKey.text = @"Cookie";
+    cookieKey.textColor = [UIColor colorWithRed:0.65 green:0.50 blue:0.25 alpha:1.0];
+    cookieKey.font = [UIFont boldSystemFontOfSize:9];
+    cookieKey.textAlignment = NSTextAlignmentLeft;
+    [cookieCard addSubview:cookieKey];
+
+    self.cookieLabel = [[UILabel alloc] initWithFrame:CGRectMake(54, 0, cookieCard.bounds.size.width - 60, infoCardH)];
+    self.cookieLabel.text = @"-";
+    self.cookieLabel.textColor = cookieColor;
+    self.cookieLabel.font = [UIFont fontWithName:@"Menlo" size:8];
     self.cookieLabel.adjustsFontSizeToFitWidth = YES;
-    self.cookieLabel.minimumScaleFactor = 0.5;
+    self.cookieLabel.minimumScaleFactor = 0.4;
     self.cookieLabel.numberOfLines = 1;
-    [self.headerView addSubview:self.cookieLabel];
+    [cookieCard addSubview:self.cookieLabel];
 
-    // ---- ScrollView for fields ----
-    CGFloat scrollY = headerH;
-    CGFloat scrollH = windowH - headerH - 40;
-    self.scrollView = [[UIScrollView alloc] initWithFrame:CGRectMake(0, scrollY, windowW, scrollH)];
-    self.scrollView.backgroundColor = [UIColor clearColor];
-    self.scrollView.showsVerticalScrollIndicator = YES;
-    self.scrollView.alwaysBounceVertical = YES;
-    [self.containerView addSubview:self.scrollView];
+    cy += infoCardH + 8;
 
-    // 创建字段标签
-    NSArray *fields = kTargetKeys();
-    CGFloat labelY = 8;
-    CGFloat labelH = 48;
-    CGFloat labelSpacing = 4;
-    UIColor *keyColor = [UIColor colorWithRed:0.4 green:0.7 blue:1.0 alpha:1.0];
-    UIColor *valueColor = [UIColor colorWithRed:0.95 green:0.85 blue:0.55 alpha:1.0];
-    UIColor *notFoundColor = [UIColor colorWithRed:0.4 green:0.4 blue:0.4 alpha:1.0];
+    // 分组定义
+    NSArray *groupDefs = @[
+        @{@"title": @"加密字段", @"r": @0.09, @"g": @0.56, @"b": @1.0,
+          @"fields": @[@"encryptSceneCode", @"encryptActCode"]},
+        @{@"title": @"活动标识", @"r": @0.32, @"g": @0.77, @"b": @0.10,
+          @"fields": @[@"rightId", @"actCode", @"sceneCode"]},
+        @{@"title": @"来源", @"r": @0.98, @"g": @0.55, @"b": @0.09,
+          @"fields": @[@"sourceFrom"]},
+    ];
 
-    for (NSString *fieldName in fields) {
-        // 容器
-        UIView *fieldContainer = [[UIView alloc] initWithFrame:CGRectMake(8, labelY, windowW - 16, labelH)];
-        fieldContainer.backgroundColor = [UIColor colorWithRed:0.1 green:0.1 blue:0.12 alpha:0.8];
-        fieldContainer.layer.cornerRadius = 6;
-        fieldContainer.layer.masksToBounds = YES;
-        [self.scrollView addSubview:fieldContainer];
+    CGFloat cardH = 36;
+    CGFloat cardSpacing = 3;
+    CGFloat groupTopMargin = 8;
+    CGFloat groupHeaderH = 20;
 
-        // Key label
-        UILabel *keyLabel = [[UILabel alloc] initWithFrame:CGRectMake(8, 2, fieldContainer.bounds.size.width - 16, 16)];
-        keyLabel.text = fieldName;
-        keyLabel.textColor = keyColor;
-        keyLabel.font = [UIFont fontWithName:@"Menlo" size:11];
-        [fieldContainer addSubview:keyLabel];
+    for (NSInteger gi = 0; gi < groupDefs.count; gi++) {
+        NSDictionary *gd = groupDefs[gi];
+        NSString *gTitle = gd[@"title"];
+        CGFloat gr = [gd[@"r"] floatValue];
+        CGFloat gg = [gd[@"g"] floatValue];
+        CGFloat gb = [gd[@"b"] floatValue];
+        NSArray *gFields = gd[@"fields"];
+        UIColor *accent = [UIColor colorWithRed:gr green:gg blue:gb alpha:1.0];
 
-        // Value label
-        UILabel *valueLabel = [[UILabel alloc] initWithFrame:CGRectMake(8, 20, fieldContainer.bounds.size.width - 16, 24)];
-        valueLabel.text = @"(waiting...)";
-        valueLabel.textColor = notFoundColor;
-        valueLabel.font = [UIFont fontWithName:@"Menlo" size:10];
-        valueLabel.adjustsFontSizeToFitWidth = YES;
-        valueLabel.minimumScaleFactor = 0.5;
-        valueLabel.numberOfLines = 2;
-        [fieldContainer addSubview:valueLabel];
+        if (gi > 0) cy += groupTopMargin;
 
-        self.fieldLabels[fieldName] = valueLabel;
+        // 分组标题栏
+        UIView *groupHeader = [[UIView alloc] initWithFrame:CGRectMake(sidePad, cy, windowW - sidePad * 2, groupHeaderH)];
+        groupHeader.backgroundColor = [UIColor colorWithRed:0.08 green:0.08 blue:0.10 alpha:0.6];
+        groupHeader.layer.cornerRadius = 4;
+        groupHeader.layer.masksToBounds = YES;
+        [self.fieldsScrollView addSubview:groupHeader];
 
-        // 长按复制单个字段
-        UILongPressGestureRecognizer *longPress = [[UILongPressGestureRecognizer alloc]
-            initWithTarget:self action:@selector(handleLongPress:)];
-        longPress.minimumPressDuration = 0.5;
-        [fieldContainer addGestureRecognizer:longPress];
+        UIView *accentBar = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 3, groupHeaderH)];
+        accentBar.backgroundColor = accent;
+        [groupHeader addSubview:accentBar];
 
-        labelY += labelH + labelSpacing;
+        UILabel *gLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 0, groupHeader.bounds.size.width - 30, groupHeaderH)];
+        gLabel.text = gTitle;
+        gLabel.textColor = accent;
+        gLabel.font = [UIFont boldSystemFontOfSize:10];
+        gLabel.textAlignment = NSTextAlignmentLeft;
+        [groupHeader addSubview:gLabel];
+
+        UILabel *countLabel = [[UILabel alloc] initWithFrame:CGRectMake(groupHeader.bounds.size.width - 24, 0, 20, groupHeaderH)];
+        countLabel.text = [NSString stringWithFormat:@"%ld", (long)gFields.count];
+        countLabel.textColor = [UIColor colorWithRed:0.4 green:0.4 blue:0.45 alpha:1.0];
+        countLabel.font = [UIFont systemFontOfSize:9];
+        countLabel.textAlignment = NSTextAlignmentRight;
+        [groupHeader addSubview:countLabel];
+
+        cy += groupHeaderH + 3;
+
+        for (NSString *fieldName in gFields) {
+            UIView *card = [[UIView alloc] initWithFrame:CGRectMake(sidePad, cy, windowW - sidePad * 2, cardH)];
+            card.backgroundColor = cardBg;
+            card.layer.cornerRadius = 5;
+            card.layer.masksToBounds = YES;
+            [self.fieldsScrollView addSubview:card];
+
+            UIView *cardBar = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 2, cardH)];
+            cardBar.backgroundColor = [accent colorWithAlphaComponent:0.4];
+            [card addSubview:cardBar];
+
+            CGFloat keyW = 120;
+            UILabel *keyLabel = [[UILabel alloc] initWithFrame:CGRectMake(8, 0, keyW, cardH)];
+            keyLabel.text = fieldName;
+            keyLabel.textColor = keyColor;
+            keyLabel.font = [UIFont fontWithName:@"Menlo" size:10];
+            keyLabel.textAlignment = NSTextAlignmentLeft;
+            keyLabel.adjustsFontSizeToFitWidth = YES;
+            keyLabel.minimumScaleFactor = 0.6;
+            [card addSubview:keyLabel];
+
+            UIView *vDivider = [[UIView alloc] initWithFrame:CGRectMake(keyW + 6, 5, 1, cardH - 10)];
+            vDivider.backgroundColor = [UIColor colorWithRed:0.2 green:0.2 blue:0.24 alpha:0.6];
+            [card addSubview:vDivider];
+
+            UILabel *valueLabel = [[UILabel alloc] initWithFrame:CGRectMake(keyW + 12, 0, card.bounds.size.width - keyW - 18, cardH)];
+            valueLabel.text = @"(waiting...)";
+            valueLabel.textColor = notFoundColor;
+            valueLabel.font = [UIFont fontWithName:@"Menlo" size:10];
+            valueLabel.adjustsFontSizeToFitWidth = YES;
+            valueLabel.minimumScaleFactor = 0.4;
+            valueLabel.numberOfLines = 1;
+            valueLabel.textAlignment = NSTextAlignmentLeft;
+            [card addSubview:valueLabel];
+
+            self.fieldLabels[fieldName] = valueLabel;
+
+            UILongPressGestureRecognizer *longPress = [[UILongPressGestureRecognizer alloc]
+                initWithTarget:self action:@selector(handleLongPress:)];
+            longPress.minimumPressDuration = 0.5;
+            [card addGestureRecognizer:longPress];
+
+            cy += cardH + cardSpacing;
+        }
     }
 
-    self.scrollView.contentSize = CGSizeMake(windowW, labelY + 8);
+    self.fieldsScrollView.contentSize = CGSizeMake(windowW, cy + 8);
 
-    // ---- Footer ----
-    CGFloat footerY = windowH - 40;
-    self.footerView = [[UIView alloc] initWithFrame:CGRectMake(0, footerY, windowW, 40)];
-    self.footerView.backgroundColor = [UIColor colorWithRed:0.12 green:0.12 blue:0.16 alpha:1.0];
+    // === HAR ScrollView ===
+    self.harScrollView = [[UIScrollView alloc] initWithFrame:CGRectMake(0, contentY, windowW, contentH)];
+    self.harScrollView.backgroundColor = [UIColor clearColor];
+    self.harScrollView.showsVerticalScrollIndicator = YES;
+    self.harScrollView.alwaysBounceVertical = YES;
+    self.harScrollView.hidden = YES;
+    [self.containerView addSubview:self.harScrollView];
+
+    // HAR 空状态
+    UILabel *harEmpty = [[UILabel alloc] initWithFrame:CGRectMake(0, contentH / 2 - 30, windowW, 30)];
+    harEmpty.text = @"No HAR entries yet";
+    harEmpty.textColor = [UIColor colorWithRed:0.35 green:0.35 blue:0.40 alpha:1.0];
+    harEmpty.font = [UIFont systemFontOfSize:13];
+    harEmpty.textAlignment = NSTextAlignmentCenter;
+    harEmpty.tag = 999;
+    [self.harScrollView addSubview:harEmpty];
+
+    self.harScrollView.contentSize = CGSizeMake(windowW, contentH);
+
+    // ---- Footer (44px) ----
+    CGFloat footerY = windowH - footerH;
+    self.footerView = [[UIView alloc] initWithFrame:CGRectMake(0, footerY, windowW, footerH)];
+    self.footerView.backgroundColor = [UIColor colorWithRed:0.09 green:0.09 blue:0.12 alpha:1.0];
     [self.containerView addSubview:self.footerView];
 
-    // Copy All button (current snapshot)
+    UIView *footerDivider = [[UIView alloc] initWithFrame:CGRectMake(0, 0, windowW, 1)];
+    footerDivider.backgroundColor = dividerColor;
+    [self.footerView addSubview:footerDivider];
+
+    // Fields tab footer buttons (3 buttons)
+    CGFloat btnH = 30;
+    CGFloat btnSpacing = 6;
+    CGFloat btnY = (footerH - btnH) / 2;
+
+    // Fields footer: Copy | Cookie | Clear
+    CGFloat fieldsBtnW = (windowW - btnSpacing * 4) / 3;
+
     self.exportBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    self.exportBtn.frame = CGRectMake(8, 6, 72, 28);
-    [self.exportBtn setTitle:@"📋 Copy" forState:UIControlStateNormal];
+    self.exportBtn.frame = CGRectMake(btnSpacing, btnY, fieldsBtnW, btnH);
+    [self.exportBtn setTitle:@"Copy" forState:UIControlStateNormal];
     [self.exportBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     self.exportBtn.titleLabel.font = [UIFont systemFontOfSize:10];
-    self.exportBtn.backgroundColor = [UIColor colorWithRed:0.15 green:0.4 blue:0.8 alpha:0.8];
+    self.exportBtn.backgroundColor = [UIColor colorWithRed:0.12 green:0.40 blue:0.78 alpha:0.85];
     self.exportBtn.layer.cornerRadius = 6;
     [self.exportBtn addTarget:self action:@selector(copyAllToClipboard) forControlEvents:UIControlEventTouchUpInside];
     [self.footerView addSubview:self.exportBtn];
 
-    // Copy Cookie button
     self.cookieCopyBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    self.cookieCopyBtn.frame = CGRectMake(84, 6, 72, 28);
-    [self.cookieCopyBtn setTitle:@"🍪 Cookie" forState:UIControlStateNormal];
+    self.cookieCopyBtn.frame = CGRectMake(btnSpacing * 2 + fieldsBtnW, btnY, fieldsBtnW, btnH);
+    [self.cookieCopyBtn setTitle:@"Cookie" forState:UIControlStateNormal];
     [self.cookieCopyBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     self.cookieCopyBtn.titleLabel.font = [UIFont systemFontOfSize:10];
-    self.cookieCopyBtn.backgroundColor = [UIColor colorWithRed:0.7 green:0.5 blue:0.2 alpha:0.8];
+    self.cookieCopyBtn.backgroundColor = [UIColor colorWithRed:0.65 green:0.45 blue:0.15 alpha:0.85];
     self.cookieCopyBtn.layer.cornerRadius = 6;
     [self.cookieCopyBtn addTarget:self action:@selector(copyCookieToClipboard) forControlEvents:UIControlEventTouchUpInside];
     [self.footerView addSubview:self.cookieCopyBtn];
 
-    // Export History button
-    self.historyBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    self.historyBtn.frame = CGRectMake(160, 6, 60, 28);
-    [self.historyBtn setTitle:@"📤 Hist" forState:UIControlStateNormal];
-    [self.historyBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    self.historyBtn.titleLabel.font = [UIFont systemFontOfSize:9];
-    self.historyBtn.backgroundColor = [UIColor colorWithRed:0.2 green:0.55 blue:0.3 alpha:0.8];
-    self.historyBtn.layer.cornerRadius = 6;
-    [self.historyBtn addTarget:self action:@selector(exportHistory) forControlEvents:UIControlEventTouchUpInside];
-    [self.footerView addSubview:self.historyBtn];
-
-    // API Export button
-    self.apiExportBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    self.apiExportBtn.frame = CGRectMake(224, 6, 60, 28);
-    [self.apiExportBtn setTitle:@"🔗 API" forState:UIControlStateNormal];
-    [self.apiExportBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    self.apiExportBtn.titleLabel.font = [UIFont systemFontOfSize:9];
-    self.apiExportBtn.backgroundColor = [UIColor colorWithRed:0.6 green:0.3 blue:0.6 alpha:0.8];
-    self.apiExportBtn.layer.cornerRadius = 6;
-    [self.apiExportBtn addTarget:self action:@selector(exportAPIRecords) forControlEvents:UIControlEventTouchUpInside];
-    [self.footerView addSubview:self.apiExportBtn];
-
-    // Clear button
     self.clearButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    self.clearButton.frame = CGRectMake(windowW - 68, 6, 60, 28);
-    [self.clearButton setTitle:@"🗑 Clear" forState:UIControlStateNormal];
+    self.clearButton.frame = CGRectMake(btnSpacing * 3 + fieldsBtnW * 2, btnY, fieldsBtnW, btnH);
+    [self.clearButton setTitle:@"Clear" forState:UIControlStateNormal];
     [self.clearButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     self.clearButton.titleLabel.font = [UIFont systemFontOfSize:10];
-    self.clearButton.backgroundColor = [UIColor colorWithRed:0.6 green:0.2 blue:0.2 alpha:0.8];
+    self.clearButton.backgroundColor = [UIColor colorWithRed:0.55 green:0.18 blue:0.18 alpha:0.85];
     self.clearButton.layer.cornerRadius = 6;
     [self.clearButton addTarget:self action:@selector(clearAll) forControlEvents:UIControlEventTouchUpInside];
     [self.footerView addSubview:self.clearButton];
 
-    // 拖拽手势
+    // HAR footer buttons (hidden by default)
+    CGFloat harBtnW = (windowW - btnSpacing * 3) / 2;
+
+    self.harExportBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    self.harExportBtn.frame = CGRectMake(btnSpacing, btnY, harBtnW, btnH);
+    [self.harExportBtn setTitle:@"Export HAR" forState:UIControlStateNormal];
+    [self.harExportBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    self.harExportBtn.titleLabel.font = [UIFont systemFontOfSize:10];
+    self.harExportBtn.backgroundColor = [UIColor colorWithRed:0.12 green:0.40 blue:0.78 alpha:0.85];
+    self.harExportBtn.layer.cornerRadius = 6;
+    [self.harExportBtn addTarget:self action:@selector(exportHAR) forControlEvents:UIControlEventTouchUpInside];
+    self.harExportBtn.hidden = YES;
+    [self.footerView addSubview:self.harExportBtn];
+
+    UIButton *harClearBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    harClearBtn.frame = CGRectMake(btnSpacing * 2 + harBtnW, btnY, harBtnW, btnH);
+    [harClearBtn setTitle:@"Clear HAR" forState:UIControlStateNormal];
+    [harClearBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    harClearBtn.titleLabel.font = [UIFont systemFontOfSize:10];
+    harClearBtn.backgroundColor = [UIColor colorWithRed:0.55 green:0.18 blue:0.18 alpha:0.85];
+    harClearBtn.layer.cornerRadius = 6;
+    [harClearBtn addTarget:self action:@selector(clearHar) forControlEvents:UIControlEventTouchUpInside];
+    harClearBtn.tag = 888;
+    harClearBtn.hidden = YES;
+    [self.footerView addSubview:harClearBtn];
+
+    // 手势
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc]
         initWithTarget:self action:@selector(handlePan:)];
     [self.headerView addGestureRecognizer:pan];
 
-    // 双击切换显示/隐藏
     UITapGestureRecognizer *doubleTap = [[UITapGestureRecognizer alloc]
         initWithTarget:self action:@selector(handleDoubleTap:)];
     doubleTap.numberOfTapsRequired = 2;
     [self.headerView addGestureRecognizer:doubleTap];
 
+    self.activeTab = 0;
     NSLog(@"[ElemeFieldMonitor] Float window ready!");
 }
 
@@ -555,8 +808,8 @@ static BOOL isTargetAPI(NSString *api) {
 - (void)toggleCollapse {
     dispatch_async(dispatch_get_main_queue(), ^{
         self.collapsed = !self.collapsed;
-        CGFloat fullH = 380;
-        CGFloat headerH = 104;
+        CGFloat fullH = 460;
+        CGFloat headerH = 56;
         CGFloat targetH = self.collapsed ? headerH : fullH;
         CGFloat currentW = self.window.frame.size.width;
         CGFloat currentX = self.window.frame.origin.x;
@@ -570,9 +823,10 @@ static BOOL isTargetAPI(NSString *api) {
                          animations:^{
             self.window.frame = CGRectMake(currentX, currentY, currentW, targetH);
             self.containerView.frame = CGRectMake(0, 0, currentW, targetH);
-            self.scrollView.hidden = self.collapsed;
+            self.fieldsScrollView.hidden = self.collapsed ? YES : (self.activeTab != 0);
+            self.harScrollView.hidden = self.collapsed ? YES : (self.activeTab != 1);
+            self.tabBarView.hidden = self.collapsed;
             self.footerView.hidden = self.collapsed;
-            self.cookieLabel.hidden = self.collapsed;
             [self.collapseBtn setTitle:self.collapsed ? @"▼" : @"▲" forState:UIControlStateNormal];
         } completion:nil];
     });
@@ -586,7 +840,7 @@ static BOOL isTargetAPI(NSString *api) {
         if (display.length > 60) {
             display = [NSString stringWithFormat:@"%@...", [display substringToIndex:60]];
         }
-        self.urlLabel.text = [NSString stringWithFormat:@"URL: %@", display];
+        self.urlLabel.text = display;
     });
 }
 
@@ -598,7 +852,7 @@ static BOOL isTargetAPI(NSString *api) {
         if (display.length > 50) {
             display = [NSString stringWithFormat:@"%@...", [display substringToIndex:50]];
         }
-        self.cookieLabel.text = [NSString stringWithFormat:@"Cookie: %@", display];
+        self.cookieLabel.text = display;
     });
 }
 
@@ -628,10 +882,10 @@ static BOOL isTargetAPI(NSString *api) {
 
                     // 闪烁动画提示新数据
                     [UIView animateWithDuration:0.3 animations:^{
-                        label.superview.backgroundColor = [UIColor colorWithRed:0.15 green:0.35 blue:0.15 alpha:0.9];
+                        label.superview.backgroundColor = [UIColor colorWithRed:0.12 green:0.28 blue:0.12 alpha:0.9];
                     } completion:^(BOOL finished) {
                         [UIView animateWithDuration:0.5 delay:0.3 options:UIViewAnimationOptionCurveEaseOut animations:^{
-                            label.superview.backgroundColor = [UIColor colorWithRed:0.1 green:0.1 blue:0.12 alpha:0.8];
+                            label.superview.backgroundColor = [UIColor colorWithRed:0.10 green:0.10 blue:0.13 alpha:0.85];
                         } completion:nil];
                     }];
                 }
@@ -653,63 +907,19 @@ static BOOL isTargetAPI(NSString *api) {
             self.lastUpdate = [NSDate date];
             if (api) self.lastAPI = api;
             if (source) self.lastSource = source;
-            // 只有包含重要字段的记录才保存历史
-            if (hasImportant) {
-                [self saveHistorySnapshot:source api:api];
-            }
             [self updateStatusBar];
         }
     });
 }
 
-- (void)saveHistorySnapshot:(NSString *)source api:(NSString *)api {
-    NSMutableDictionary *snapshot = [NSMutableDictionary dictionary];
-    for (NSString *key in kTargetKeys()) {
-        NSString *value = self.fieldValues[key];
-        if (value) {
-            snapshot[key] = value;
-        }
-    }
-    snapshot[@"_source"] = source ?: @"-";
-    snapshot[@"_api"] = api ?: self.lastAPI ?: @"-";
-    snapshot[@"_url"] = self.lastURL ?: @"-";
-    snapshot[@"_cookie"] = self.lastCookie ?: @"-";
-    snapshot[@"_timestamp"] = [self.lastUpdate description] ?: @"-";
-    snapshot[@"_index"] = @(self.historyRecords.count + 1);
-    
-    // 去重: 如果最后一条记录的所有字段值完全相同则跳过
-    if (self.historyRecords.count > 0) {
-        NSDictionary *last = self.historyRecords.lastObject;
-        BOOL isDuplicate = YES;
-        for (NSString *key in kTargetKeys()) {
-            NSString *oldVal = last[key];
-            NSString *newVal = snapshot[key];
-            if (![oldVal isEqualToString:newVal]) {
-                isDuplicate = NO;
-                break;
-            }
-        }
-        // API 不同也算新记录
-        if (![last[@"_api"] isEqualToString:snapshot[@"_api"]]) {
-            isDuplicate = NO;
-        }
-        if (isDuplicate) return;
-    }
-    
-    [self.historyRecords addObject:snapshot];
-    // 限制历史记录最多 500 条，防止内存溢出
-    if (self.historyRecords.count > 500) {
-        [self.historyRecords removeObjectAtIndex:0];
-    }
-}
 
 - (void)updateStatusBar {
     NSDateFormatter *fmt = [[NSDateFormatter alloc] init];
     fmt.dateFormat = @"HH:mm:ss";
     NSString *timeStr = self.lastUpdate ? [fmt stringFromDate:self.lastUpdate] : @"--:--:--";
 
-    self.statusLabel.text = [NSString stringWithFormat:@"Count: %ld | Hist: %ld | %@",
-                              (long)self.captureCount, (long)self.historyRecords.count, timeStr];
+    self.statusLabel.text = [NSString stringWithFormat:@"Count: %ld | HAR: %ld | %@",
+                              (long)self.captureCount, (long)self.harEntries.count, timeStr];
 
     // 截断 API 名称
     NSString *apiDisplay = self.lastAPI ?: @"-";
@@ -753,77 +963,142 @@ static BOOL isTargetAPI(NSString *api) {
     [self showToast:@"Cookie copied!"];
 }
 
-- (void)exportAPIRecords {
-    if (self.apiRecords.count == 0) {
-        [self showToast:@"No API records!"];
+- (void)exportHAR {
+    if (self.harEntries.count == 0) {
+        [self showToast:@"No HAR entries!"];
         return;
     }
-    NSDictionary *export = @{
-        @"app": @"ElemeFieldMonitor",
-        @"exportTime": [[NSDate date] description],
-        @"totalAPIRecords": @(self.apiRecords.count),
-        @"targetAPIs": kTargetAPIs(),
-        @"records": self.apiRecords
+    // 将 pendingRequests 中未配对的请求也作为条目输出
+    NSMutableArray *allEntries = [self.harEntries mutableCopy];
+    for (NSString *api in self.pendingRequests) {
+        NSDictionary *req = self.pendingRequests[api];
+        NSMutableDictionary *entry = [NSMutableDictionary dictionary];
+        entry[@"startedDateTime"] = req[@"_timestamp"] ?: [[NSDate date] description];
+        entry[@"time"] = @0;
+        entry[@"_api"] = api;
+        // request
+        NSMutableDictionary *harReq = [NSMutableDictionary dictionary];
+        harReq[@"method"] = req[@"method"] ?: @"GET";
+        harReq[@"url"] = req[@"url"] ?: @"-";
+        harReq[@"httpVersion"] = @"HTTP/1.1";
+        // headers array
+        NSMutableArray *hdrArr = [NSMutableArray array];
+        NSDictionary *hdrs = req[@"headers"];
+        for (NSString *hk in hdrs) {
+            [hdrArr addObject:@{@"name": hk, @"value": [NSString stringWithFormat:@"%@", hdrs[hk]]}];
+        }
+        harReq[@"headers"] = hdrArr;
+        harReq[@"queryString"] = @[];
+        harReq[@"headersSize"] = @(-1);
+        NSString *bodyStr = req[@"body"] ?: @"";
+        harReq[@"bodySize"] = @(bodyStr.length);
+        if (bodyStr.length > 0 && ![bodyStr isEqualToString:@"-"]) {
+            harReq[@"postData"] = @{@"mimeType": @"application/json", @"text": bodyStr};
+        }
+        entry[@"request"] = harReq;
+        // empty response
+        entry[@"response"] = @{
+            @"status": @0,
+            @"statusText": @"(no response captured)",
+            @"httpVersion": @"HTTP/1.1",
+            @"headers": @[],
+            @"cookies": @[],
+            @"content": @{@"mimeType": @"", @"text": @"", @"size": @0},
+            @"redirectURL": @"",
+            @"headersSize": @(-1),
+            @"bodySize": @0
+        };
+        entry[@"cache"] = @{};
+        entry[@"timings"] = @{@"send": @0, @"wait": @0, @"receive": @0};
+        [allEntries addObject:entry];
+    }
+
+    NSDictionary *har = @{
+        @"log": @{
+            @"version": @"1.2",
+            @"creator": @{@"name": @"ElemeFieldMonitor", @"version": @"1.0"},
+            @"entries": allEntries
+        }
     };
-    NSData *data = [NSJSONSerialization dataWithJSONObject:export options:NSJSONWritingPrettyPrinted error:nil];
+    NSData *data = [NSJSONSerialization dataWithJSONObject:har options:NSJSONWritingPrettyPrinted error:nil];
     NSString *jsonStr = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
     UIPasteboard.generalPasteboard.string = jsonStr;
-    [self showToast:[NSString stringWithFormat:@"Exported %ld API records!", (long)self.apiRecords.count]];
+    [self showToast:[NSString stringWithFormat:@"Exported %ld HAR entries!", (long)allEntries.count]];
 }
 
 - (void)recordAPIRequest:(NSString *)api url:(NSString *)url method:(NSString *)method headers:(NSDictionary *)headers body:(NSString *)body {
+    if (!api || api.length == 0) return;
     dispatch_async(dispatch_get_main_queue(), ^{
-        NSMutableDictionary *record = [NSMutableDictionary dictionary];
-        record[@"api"] = api ?: @"-";
-        record[@"url"] = url ?: @"-";
-        record[@"method"] = method ?: @"GET";
-        record[@"requestHeaders"] = headers ?: @{};
-        record[@"requestBody"] = body ?: @"-";
-        record[@"_timestamp"] = [[NSDate date] description];
-        record[@"_type"] = @"request";
-        record[@"_index"] = @(self.apiRecords.count + 1);
-        [self.apiRecords addObject:record];
-        if (self.apiRecords.count > 200) {
-            [self.apiRecords removeObjectAtIndex:0];
-        }
-        NSLog(@"[ElemeFieldMonitor] API Record #%ld: %@", (long)self.apiRecords.count, api);
+        NSMutableDictionary *req = [NSMutableDictionary dictionary];
+        req[@"api"] = api;
+        req[@"url"] = url ?: @"-";
+        req[@"method"] = method ?: @"GET";
+        req[@"headers"] = headers ?: @{};
+        req[@"body"] = body ?: @"-";
+        req[@"_timestamp"] = [[NSDate date] description];
+        // 存入 pendingRequests，等待响应配对
+        self.pendingRequests[api] = req;
+        NSLog(@"[ElemeFieldMonitor] API request pending: %@", api);
     });
 }
 
 - (void)recordAPIResponse:(NSString *)api response:(NSString *)response statusCode:(NSInteger)code {
+    if (!api || api.length == 0) return;
     dispatch_async(dispatch_get_main_queue(), ^{
-        NSMutableDictionary *record = [NSMutableDictionary dictionary];
-        record[@"api"] = api ?: @"-";
-        record[@"responseBody"] = response ?: @"-";
-        record[@"statusCode"] = @(code);
-        record[@"_timestamp"] = [[NSDate date] description];
-        record[@"_type"] = @"response";
-        record[@"_index"] = @(self.apiRecords.count + 1);
-        [self.apiRecords addObject:record];
-        if (self.apiRecords.count > 200) {
-            [self.apiRecords removeObjectAtIndex:0];
+        // 查找 pending request
+        NSDictionary *pendingReq = self.pendingRequests[api];
+        
+        NSMutableDictionary *entry = [NSMutableDictionary dictionary];
+        entry[@"_api"] = api;
+        entry[@"startedDateTime"] = pendingReq[@"_timestamp"] ?: [[NSDate date] description];
+        entry[@"time"] = @0;
+        
+        // build request part
+        NSMutableDictionary *harReq = [NSMutableDictionary dictionary];
+        harReq[@"method"] = pendingReq[@"method"] ?: @"GET";
+        harReq[@"url"] = pendingReq[@"url"] ?: @"-";
+        harReq[@"httpVersion"] = @"HTTP/1.1";
+        NSMutableArray *hdrArr = [NSMutableArray array];
+        NSDictionary *hdrs = pendingReq[@"headers"];
+        for (NSString *hk in hdrs) {
+            [hdrArr addObject:@{@"name": hk, @"value": [NSString stringWithFormat:@"%@", hdrs[hk]]}];
         }
-        NSLog(@"[ElemeFieldMonitor] API Response #%ld: %@", (long)self.apiRecords.count, api);
+        harReq[@"headers"] = hdrArr;
+        harReq[@"queryString"] = @[];
+        harReq[@"headersSize"] = @(-1);
+        NSString *bodyStr = pendingReq[@"body"] ?: @"";
+        harReq[@"bodySize"] = @(bodyStr.length);
+        if (bodyStr.length > 0 && ![bodyStr isEqualToString:@"-"]) {
+            harReq[@"postData"] = @{@"mimeType": @"application/json", @"text": bodyStr};
+        }
+        entry[@"request"] = harReq;
+        
+        // build response part
+        NSString *respStr = response ?: @"";
+        NSInteger respSize = respStr.length;
+        entry[@"response"] = @{
+            @"status": @(code),
+            @"statusText": code > 0 ? @"OK" : @"(unknown)",
+            @"httpVersion": @"HTTP/1.1",
+            @"headers": @[],
+            @"cookies": @[],
+            @"content": @{@"mimeType": @"application/json", @"text": respStr, @"size": @(respSize)},
+            @"redirectURL": @"",
+            @"headersSize": @(-1),
+            @"bodySize": @(respSize)
+        };
+        entry[@"cache"] = @{};
+        entry[@"timings"] = @{@"send": @0, @"wait": @0, @"receive": @0};
+        
+        [self.harEntries addObject:entry];
+        // 移除 pending request
+        [self.pendingRequests removeObjectForKey:api];
+        NSLog(@"[ElemeFieldMonitor] HAR entry #%ld: %@", (long)self.harEntries.count, api);
+        // 如果当前在 HAR tab，刷新列表
+        if (self.activeTab == 1) {
+            [self refreshHarList];
+        }
     });
-}
-
-- (void)exportHistory {
-    if (self.historyRecords.count == 0) {
-        [self showToast:@"No history to export!"];
-        return;
-    }
-    NSDictionary *export = @{
-        @"app": @"ElemeFieldMonitor",
-        @"exportTime": [[NSDate date] description],
-        @"totalRecords": @(self.historyRecords.count),
-        @"fields": kTargetKeys(),
-        @"records": self.historyRecords
-    };
-    NSData *data = [NSJSONSerialization dataWithJSONObject:export options:NSJSONWritingPrettyPrinted error:nil];
-    NSString *jsonStr = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-    UIPasteboard.generalPasteboard.string = jsonStr;
-
-    [self showToast:[NSString stringWithFormat:@"Exported %ld records!", (long)self.historyRecords.count]];
 }
 
 - (void)clearAll {
@@ -833,7 +1108,7 @@ static BOOL isTargetAPI(NSString *api) {
         UILabel *label = self.fieldLabels[key];
         if (label) {
             label.text = @"(waiting...)";
-            label.textColor = [UIColor colorWithRed:0.4 green:0.4 blue:0.4 alpha:1.0];
+            label.textColor = [UIColor colorWithRed:0.35 green:0.35 blue:0.38 alpha:1.0];
         }
     }
     self.captureCount = 0;
@@ -842,12 +1117,272 @@ static BOOL isTargetAPI(NSString *api) {
     self.lastURL = @"-";
     self.lastCookie = @"-";
     self.lastUpdate = nil;
-    [self.historyRecords removeAllObjects];
-    [self.apiRecords removeAllObjects];
+    [self.pendingRequests removeAllObjects];
+    [self.harEntries removeAllObjects];
     self.urlLabel.text = @"URL: -";
     self.cookieLabel.text = @"Cookie: -";
     [self updateStatusBar];
+    [self refreshHarList];
     [self showToast:@"Cleared!"];
+}
+
+- (void)tabFieldsTapped {
+    [self switchTab:0];
+}
+
+- (void)tabHarTapped {
+    [self switchTab:1];
+}
+
+- (void)switchTab:(NSInteger)tabIndex {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        self.activeTab = tabIndex;
+        UIColor *activeColor = [UIColor colorWithRed:0.25 green:0.60 blue:1.0 alpha:1.0];
+        UIColor *inactiveColor = [UIColor colorWithRed:0.45 green:0.45 blue:0.50 alpha:1.0];
+
+        if (tabIndex == 0) {
+            // Fields tab
+            self.fieldsScrollView.hidden = NO;
+            self.harScrollView.hidden = YES;
+            [self.tabFieldsBtn setTitleColor:activeColor forState:UIControlStateNormal];
+            [self.tabHarBtn setTitleColor:inactiveColor forState:UIControlStateNormal];
+            [UIView animateWithDuration:0.2 animations:^{
+                self.tabFieldsIndicator.alpha = 1.0;
+                self.tabHarIndicator.alpha = 0.0;
+            }];
+            // Footer buttons
+            self.exportBtn.hidden = NO;
+            self.cookieCopyBtn.hidden = NO;
+            self.clearButton.hidden = NO;
+            self.harExportBtn.hidden = YES;
+            UIView *harClear = [self.footerView viewWithTag:888];
+            harClear.hidden = YES;
+        } else {
+            // HAR tab
+            self.fieldsScrollView.hidden = YES;
+            self.harScrollView.hidden = NO;
+            [self.tabFieldsBtn setTitleColor:inactiveColor forState:UIControlStateNormal];
+            [self.tabHarBtn setTitleColor:activeColor forState:UIControlStateNormal];
+            [UIView animateWithDuration:0.2 animations:^{
+                self.tabFieldsIndicator.alpha = 0.0;
+                self.tabHarIndicator.alpha = 1.0;
+            }];
+            // Footer buttons
+            self.exportBtn.hidden = YES;
+            self.cookieCopyBtn.hidden = YES;
+            self.clearButton.hidden = YES;
+            self.harExportBtn.hidden = NO;
+            UIView *harClear = [self.footerView viewWithTag:888];
+            harClear.hidden = NO;
+            // Refresh HAR list
+            [self refreshHarList];
+        }
+    });
+}
+
+- (void)refreshHarList {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        // 清除旧内容（保留 tag=999 空状态标签）
+        NSMutableArray *toRemove = [NSMutableArray array];
+        for (UIView *sub in self.harScrollView.subviews) {
+            if (sub.tag != 999) {
+                [toRemove addObject:sub];
+            }
+        }
+        for (UIView *sub in toRemove) {
+            [sub removeFromSuperview];
+        }
+
+        // 隐藏空状态
+        UILabel *emptyLabel = (UILabel *)[self.harScrollView viewWithTag:999];
+        BOOL hasEntries = (self.harEntries.count > 0) || (self.pendingRequests.count > 0);
+
+        if (!hasEntries) {
+            emptyLabel.hidden = NO;
+            self.harScrollView.contentSize = CGSizeMake(self.harScrollView.bounds.size.width, self.harScrollView.bounds.size.height);
+            return;
+        }
+        emptyLabel.hidden = YES;
+
+        CGFloat cy = 8;
+        CGFloat sidePad = 10;
+        CGFloat cardW = self.harScrollView.bounds.size.width - sidePad * 2;
+        CGFloat cardSpacing = 4;
+
+        // 已配对的 HAR entries
+        for (NSInteger i = 0; i < (NSInteger)self.harEntries.count; i++) {
+            NSDictionary *entry = self.harEntries[i];
+            NSString *apiName = entry[@"_api"] ?: [NSString stringWithFormat:@"Entry %ld", (long)(i + 1)];
+            NSDictionary *req = entry[@"request"];
+            NSDictionary *resp = entry[@"response"];
+            NSString *method = req[@"method"] ?: @"?";
+            NSString *url = req[@"url"] ?: @"-";
+            NSInteger statusCode = [resp[@"status"] integerValue];
+            NSString *bodyStr = @"";
+            if (req[@"postData"][@"text"]) {
+                bodyStr = req[@"postData"][@"text"];
+            }
+            NSString *respStr = @"";
+            if (resp[@"content"][@"text"]) {
+                respStr = resp[@"content"][@"text"];
+            }
+
+            // 截断显示
+            NSString *urlShort = url;
+            if (urlShort.length > 50) {
+                urlShort = [NSString stringWithFormat:@"%@...", [urlShort substringToIndex:50]];
+            }
+
+            // 计算卡片高度: API名(18) + URL(16) + Method/Status(16) + Body预览(28) + Response预览(28) + padding
+            CGFloat cardH = 18 + 16 + 16 + 28 + 28 + 12;
+
+            UIView *card = [[UIView alloc] initWithFrame:CGRectMake(sidePad, cy, cardW, cardH)];
+            card.backgroundColor = [UIColor colorWithRed:0.10 green:0.10 blue:0.13 alpha:0.85];
+            card.layer.cornerRadius = 6;
+            card.layer.masksToBounds = YES;
+            [self.harScrollView addSubview:card];
+
+            // 左侧色条 (根据状态码变色)
+            UIColor *statusColor = (statusCode >= 200 && statusCode < 300) ?
+                [UIColor colorWithRed:0.32 green:0.77 blue:0.10 alpha:1.0] :
+                [UIColor colorWithRed:0.55 green:0.18 blue:0.18 alpha:1.0];
+            UIView *bar = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 3, cardH)];
+            bar.backgroundColor = statusColor;
+            [card addSubview:bar];
+
+            // 序号 + API名
+            UILabel *apiLabel = [[UILabel alloc] initWithFrame:CGRectMake(8, 4, cardW - 16, 18)];
+            apiLabel.text = [NSString stringWithFormat:@"%ld. %@", (long)(i + 1), apiName];
+            apiLabel.textColor = [UIColor colorWithRed:0.40 green:0.78 blue:0.47 alpha:1.0];
+            apiLabel.font = [UIFont fontWithName:@"Menlo" size:10];
+            apiLabel.adjustsFontSizeToFitWidth = YES;
+            apiLabel.minimumScaleFactor = 0.5;
+            [card addSubview:apiLabel];
+
+            // URL
+            UILabel *urlLabel = [[UILabel alloc] initWithFrame:CGRectMake(8, 22, cardW - 16, 14)];
+            urlLabel.text = urlShort;
+            urlLabel.textColor = [UIColor colorWithRed:0.55 green:0.65 blue:0.90 alpha:1.0];
+            urlLabel.font = [UIFont fontWithName:@"Menlo" size:8];
+            urlLabel.adjustsFontSizeToFitWidth = YES;
+            urlLabel.minimumScaleFactor = 0.4;
+            [card addSubview:urlLabel];
+
+            // Method + Status
+            UILabel *msLabel = [[UILabel alloc] initWithFrame:CGRectMake(8, 37, cardW - 16, 14)];
+            msLabel.text = [NSString stringWithFormat:@"%@ | Status: %ld", method, (long)statusCode];
+            msLabel.textColor = [UIColor colorWithRed:0.50 green:0.58 blue:0.65 alpha:1.0];
+            msLabel.font = [UIFont fontWithName:@"Menlo" size:9];
+            [card addSubview:msLabel];
+
+            // Body preview
+            NSString *bodyPreview = bodyStr;
+            if (bodyPreview.length > 80) {
+                bodyPreview = [NSString stringWithFormat:@"%@...", [bodyPreview substringToIndex:80]];
+            }
+            UILabel *bodyLabel = [[UILabel alloc] initWithFrame:CGRectMake(8, 52, cardW - 16, 24)];
+            bodyLabel.text = [NSString stringWithFormat:@"Req: %@", bodyPreview];
+            bodyLabel.textColor = [UIColor colorWithRed:0.85 green:0.75 blue:0.45 alpha:1.0];
+            bodyLabel.font = [UIFont fontWithName:@"Menlo" size:8];
+            bodyLabel.adjustsFontSizeToFitWidth = YES;
+            bodyLabel.minimumScaleFactor = 0.4;
+            bodyLabel.numberOfLines = 2;
+            [card addSubview:bodyLabel];
+
+            // Response preview
+            NSString *respPreview = respStr;
+            if (respPreview.length > 80) {
+                respPreview = [NSString stringWithFormat:@"%@...", [respPreview substringToIndex:80]];
+            }
+            UILabel *respLabel = [[UILabel alloc] initWithFrame:CGRectMake(8, 78, cardW - 16, 24)];
+            respLabel.text = [NSString stringWithFormat:@"Res: %@", respPreview];
+            respLabel.textColor = [UIColor colorWithRed:0.65 green:0.80 blue:0.55 alpha:1.0];
+            respLabel.font = [UIFont fontWithName:@"Menlo" size:8];
+            respLabel.adjustsFontSizeToFitWidth = YES;
+            respLabel.minimumScaleFactor = 0.4;
+            respLabel.numberOfLines = 2;
+            [card addSubview:respLabel];
+
+            cy += cardH + cardSpacing;
+        }
+
+        // Pending requests (未配对)
+        NSInteger pendingIdx = (NSInteger)self.harEntries.count;
+        for (NSString *apiName in self.pendingRequests) {
+            NSDictionary *req = self.pendingRequests[apiName];
+            NSString *method = req[@"method"] ?: @"?";
+            NSString *url = req[@"url"] ?: @"-";
+            NSString *bodyStr = req[@"body"] ?: @"";
+
+            NSString *urlShort = url;
+            if (urlShort.length > 50) {
+                urlShort = [NSString stringWithFormat:@"%@...", [urlShort substringToIndex:50]];
+            }
+
+            CGFloat cardH = 18 + 16 + 16 + 28 + 12;
+
+            UIView *card = [[UIView alloc] initWithFrame:CGRectMake(sidePad, cy, cardW, cardH)];
+            card.backgroundColor = [UIColor colorWithRed:0.10 green:0.10 blue:0.13 alpha:0.85];
+            card.layer.cornerRadius = 6;
+            card.layer.masksToBounds = YES;
+            [self.harScrollView addSubview:card];
+
+            // 橙色色条表示 pending
+            UIView *bar = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 3, cardH)];
+            bar.backgroundColor = [UIColor colorWithRed:0.90 green:0.60 blue:0.10 alpha:1.0];
+            [card addSubview:bar];
+
+            UILabel *apiLabel = [[UILabel alloc] initWithFrame:CGRectMake(8, 4, cardW - 16, 18)];
+            apiLabel.text = [NSString stringWithFormat:@"%ld. %@ (pending)", (long)(pendingIdx + 1), apiName];
+            apiLabel.textColor = [UIColor colorWithRed:0.90 green:0.60 blue:0.10 alpha:1.0];
+            apiLabel.font = [UIFont fontWithName:@"Menlo" size:10];
+            apiLabel.adjustsFontSizeToFitWidth = YES;
+            apiLabel.minimumScaleFactor = 0.5;
+            [card addSubview:apiLabel];
+
+            UILabel *urlLabel = [[UILabel alloc] initWithFrame:CGRectMake(8, 22, cardW - 16, 14)];
+            urlLabel.text = urlShort;
+            urlLabel.textColor = [UIColor colorWithRed:0.55 green:0.65 blue:0.90 alpha:1.0];
+            urlLabel.font = [UIFont fontWithName:@"Menlo" size:8];
+            urlLabel.adjustsFontSizeToFitWidth = YES;
+            urlLabel.minimumScaleFactor = 0.4;
+            [card addSubview:urlLabel];
+
+            UILabel *msLabel = [[UILabel alloc] initWithFrame:CGRectMake(8, 37, cardW - 16, 14)];
+            msLabel.text = [NSString stringWithFormat:@"%@ | Waiting response...", method];
+            msLabel.textColor = [UIColor colorWithRed:0.50 green:0.58 blue:0.65 alpha:1.0];
+            msLabel.font = [UIFont fontWithName:@"Menlo" size:9];
+            [card addSubview:msLabel];
+
+            NSString *bodyPreview = bodyStr;
+            if (bodyPreview.length > 80) {
+                bodyPreview = [NSString stringWithFormat:@"%@...", [bodyPreview substringToIndex:80]];
+            }
+            UILabel *bodyLabel = [[UILabel alloc] initWithFrame:CGRectMake(8, 52, cardW - 16, 24)];
+            bodyLabel.text = [NSString stringWithFormat:@"Req: %@", bodyPreview];
+            bodyLabel.textColor = [UIColor colorWithRed:0.85 green:0.75 blue:0.45 alpha:1.0];
+            bodyLabel.font = [UIFont fontWithName:@"Menlo" size:8];
+            bodyLabel.adjustsFontSizeToFitWidth = YES;
+            bodyLabel.minimumScaleFactor = 0.4;
+            bodyLabel.numberOfLines = 2;
+            [card addSubview:bodyLabel];
+
+            cy += cardH + cardSpacing;
+            pendingIdx++;
+        }
+
+        self.harScrollView.contentSize = CGSizeMake(self.harScrollView.bounds.size.width, cy + 8);
+    });
+}
+
+- (void)clearHar {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self.pendingRequests removeAllObjects];
+        [self.harEntries removeAllObjects];
+        [self updateStatusBar];
+        [self refreshHarList];
+        [self showToast:@"HAR cleared!"];
+    });
 }
 
 - (void)showToast:(NSString *)msg {
@@ -895,22 +1430,58 @@ static BOOL isTargetAPI(NSString *api) {
         @try {
             NSMutableDictionary *results = [NSMutableDictionary dictionary];
             [FieldHunter searchInObject:result results:results];
-            if (results.count > 0) {
-                // 尝试从 JSON 中提取 API 名称
-                NSString *api = nil;
-                if ([result isKindOfClass:[NSDictionary class]]) {
-                    api = result[@"api"] ?: result[@"apiName"];
-                    if (!api) {
-                        // 搜索嵌套的 api 字段
-                        NSDictionary *dict = (NSDictionary *)result;
-                        if (dict[@"data"] && [dict[@"data"] isKindOfClass:[NSDictionary class]]) {
-                            api = dict[@"data"][@"api"];
-                        }
+            
+            // 提取 API 名称（不受 results 门控）
+            NSString *api = nil;
+            if ([result isKindOfClass:[NSDictionary class]]) {
+                api = result[@"api"] ?: result[@"apiName"];
+                if (!api) {
+                    // 搜索嵌套的 api 字段
+                    NSDictionary *dict = (NSDictionary *)result;
+                    if (dict[@"data"] && [dict[@"data"] isKindOfClass:[NSDictionary class]]) {
+                        api = dict[@"data"][@"api"];
                     }
                 }
+            }
+            
+            // 更新 UI 字段（仅当找到目标字段时）
+            if (results.count > 0) {
                 [[FloatWindowManager sharedInstance] updateWithDictionary:results
                                                                     source:@"JSONResponse"
                                                                        api:api];
+            }
+            
+            // 如果有 API 名称，区分请求信封和响应（不受 results 门控，不限目标 API）
+            if (api && api.length > 0) {
+                NSString *rawStr = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] ?: @"-";
+                NSDictionary *dict = (NSDictionary *)result;
+                BOOL isRequestEnvelope = (dict[@"param"] != nil && dict[@"data"] == nil && dict[@"ret"] == nil);
+                BOOL isResponse = (dict[@"data"] != nil || dict[@"ret"] != nil);
+                
+                if (isRequestEnvelope) {
+                    // MTOP 请求信封（被 JSON 解析捕获）
+                    NSString *reqURL = g_lastURL ?: @"-";
+                    NSString *reqMethod = g_lastMethod ?: @"POST";
+                    NSDictionary *reqHeaders = g_lastHeaders ?: @{};
+                    [[FloatWindowManager sharedInstance] recordAPIRequest:api
+                                                                      url:reqURL
+                                                                   method:reqMethod
+                                                                  headers:reqHeaders
+                                                                     body:rawStr];
+                    NSLog(@"[ElemeFieldMonitor] Target API request (envelope) captured: %@", api);
+                } else if (isResponse) {
+                    // MTOP 响应
+                    [[FloatWindowManager sharedInstance] recordAPIResponse:api
+                                                                   response:rawStr
+                                                                  statusCode:0];
+                    NSLog(@"[ElemeFieldMonitor] Target API response (JSON) captured: %@", api);
+                } else {
+                    // 未知类型，默认当响应
+                    [[FloatWindowManager sharedInstance] recordAPIResponse:api
+                                                                   response:rawStr
+                                                                  statusCode:0];
+                    NSLog(@"[ElemeFieldMonitor] Target API unknown (JSON) captured: %@", api);
+                }
             }
         } @catch (NSException *e) {
             // 忽略异常
@@ -929,6 +1500,30 @@ static BOOL isTargetAPI(NSString *api) {
                 [[FloatWindowManager sharedInstance] updateWithDictionary:results
                                                                     source:@"JSONStream"
                                                                        api:nil];
+            }
+        } @catch (NSException *e) {}
+    }
+    return result;
+}
+
+// Hook dataWithJSONObject:options:error: (捕获请求序列化)
++ (NSData *)dataWithJSONObject:(id)obj options:(NSJSONWritingOptions)opt error:(NSError **)error {
+    NSData *result = %orig;
+    if (result && result.length > 0 && [obj isKindOfClass:[NSDictionary class]]) {
+        @try {
+            NSString *api = obj[@"api"] ?: obj[@"apiName"];
+            if (api && api.length > 0) {
+                // 这是 API 请求序列化
+                NSString *bodyStr = [[NSString alloc] initWithData:result encoding:NSUTF8StringEncoding] ?: @"-";
+                NSString *reqURL = g_lastURL ?: @"-";
+                NSString *reqMethod = g_lastMethod ?: @"POST";
+                NSDictionary *reqHeaders = g_lastHeaders ?: @{};
+                [[FloatWindowManager sharedInstance] recordAPIRequest:api
+                                                                  url:reqURL
+                                                               method:reqMethod
+                                                              headers:reqHeaders
+                                                                 body:bodyStr];
+                NSLog(@"[ElemeFieldMonitor] API request (serialize) captured: %@", api);
             }
         } @catch (NSException *e) {}
     }
@@ -1002,8 +1597,8 @@ static BOOL isTargetAPI(NSString *api) {
         [[FloatWindowManager sharedInstance] updateCookie:cookieHeader];
     }
 
-    // 如果是目标 API，记录完整请求信息
-    if (isTargetAPI(requestAPI)) {
+    // 如果有 API 名称，记录完整请求信息（不限目标 API）
+    if (requestAPI && requestAPI.length > 0) {
         NSString *bodyStr = @"-";
         if (body) {
             bodyStr = [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding] ?: @"-";
@@ -1013,7 +1608,7 @@ static BOOL isTargetAPI(NSString *api) {
                                                         method:request.HTTPMethod ?: @"GET"
                                                        headers:headers ?: @{}
                                                           body:bodyStr];
-        NSLog(@"[ElemeFieldMonitor] Target API request captured: %@", requestAPI);
+        NSLog(@"[ElemeFieldMonitor] API request captured: %@", requestAPI);
     }
 
     // ---- 包装 completionHandler 拦截响应 ----
@@ -1047,9 +1642,9 @@ static BOOL isTargetAPI(NSString *api) {
                                                                            api:respAPI ?: requestAPI];
                 }
                 
-                // 如果是目标 API，记录完整响应
+                // 如果有 API 名称，记录完整响应（不限目标 API）
                 NSString *effectiveAPI = respAPI ?: requestAPI;
-                if (isTargetAPI(effectiveAPI)) {
+                if (effectiveAPI && effectiveAPI.length > 0) {
                     NSString *respStr = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] ?: @"-";
                     NSInteger statusCode = 0;
                     if ([response isKindOfClass:[NSHTTPURLResponse class]]) {
@@ -1058,7 +1653,7 @@ static BOOL isTargetAPI(NSString *api) {
                     [[FloatWindowManager sharedInstance] recordAPIResponse:effectiveAPI
                                                                    response:respStr
                                                                   statusCode:statusCode];
-                    NSLog(@"[ElemeFieldMonitor] Target API response captured: %@", effectiveAPI);
+                    NSLog(@"[ElemeFieldMonitor] API response captured: %@", effectiveAPI);
                 }
             } @catch (NSException *e) {}
         }
@@ -1068,9 +1663,14 @@ static BOOL isTargetAPI(NSString *api) {
     return %orig(request, wrappedHandler);
 }
 
+- (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request {
+    captureRequestIfNeeded(request);
+    return %orig;
+}
+
 %end
 
-// --- Hook 3: NSMutableURLRequest (拦截请求 body 设置) ---
+// --- Hook 3: NSMutableURLRequest (拦截请求 body 和 URL 设置) ---
 %hook NSMutableURLRequest
 
 - (void)setHTTPBody:(NSData *)body {
@@ -1078,23 +1678,142 @@ static BOOL isTargetAPI(NSString *api) {
 
     if (body && body.length > 0) {
         @try {
+            // 提取 API（不受 results 门控）
+            NSString *api = nil;
+            id bodyJson = [NSJSONSerialization JSONObjectWithData:body
+                                                          options:NSJSONReadingAllowFragments
+                                                            error:nil];
+            if ([bodyJson isKindOfClass:[NSDictionary class]]) {
+                api = bodyJson[@"api"] ?: bodyJson[@"apiName"];
+            }
+            
+            // 搜索目标字段并更新 UI（仅当找到目标字段时）
             NSMutableDictionary *results = [NSMutableDictionary dictionary];
             [FieldHunter searchInBody:body results:results];
             if (results.count > 0) {
-                // 尝试从 body 提取 API
-                NSString *api = nil;
-                id bodyJson = [NSJSONSerialization JSONObjectWithData:body
-                                                              options:NSJSONReadingAllowFragments
-                                                                error:nil];
-                if ([bodyJson isKindOfClass:[NSDictionary class]]) {
-                    api = bodyJson[@"api"] ?: bodyJson[@"apiName"];
-                }
                 [[FloatWindowManager sharedInstance] updateWithDictionary:results
                                                                     source:@"RequestBody"
                                                                        api:api];
             }
+            
+            // 如果有 API 名称，记录完整请求（不限目标 API，不受 results 门控）
+            if (api && api.length > 0) {
+                NSString *bodyStr = [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding] ?: @"-";
+                NSString *reqURL = @"-";
+                NSString *reqMethod = @"POST";
+                NSDictionary *reqHeaders = @{};
+                @try {
+                    NSURL *selfURL = [self URL];
+                    if (selfURL) reqURL = selfURL.absoluteString;
+                    reqMethod = [self HTTPMethod] ?: @"POST";
+                    reqHeaders = [self allHTTPHeaderFields] ?: @{};
+                } @catch (NSException *e) {}
+                [[FloatWindowManager sharedInstance] recordAPIRequest:api
+                                                                  url:reqURL
+                                                               method:reqMethod
+                                                              headers:reqHeaders
+                                                                 body:bodyStr];
+                NSLog(@"[ElemeFieldMonitor] API request (body) captured: %@", api);
+            }
+            // 如果 body 中没有 API，也检查 URL
+            if (!api || api.length == 0) {
+                NSURL *selfURL = [self URL];
+                NSString *urlAPI = extractAPIFromURL(selfURL);
+                if (urlAPI && urlAPI.length > 0) {
+                    NSString *bodyStr = [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding] ?: @"-";
+                    [[FloatWindowManager sharedInstance] recordAPIRequest:urlAPI
+                                                                      url:selfURL.absoluteString
+                                                                   method:[self HTTPMethod] ?: @"POST"
+                                                                  headers:[self allHTTPHeaderFields] ?: @{}
+                                                                     body:bodyStr];
+                    NSLog(@"[ElemeFieldMonitor] API request (URL) captured: %@", urlAPI);
+                }
+            }
         } @catch (NSException *e) {}
     }
+}
+
+- (void)setURL:(NSURL *)url {
+    %orig;
+    if (url) {
+        // 缓存最近的 URL 信息，供 MTOP 请求信封关联
+        g_lastURL = url.absoluteString;
+        @try {
+            g_lastMethod = [self HTTPMethod] ?: @"POST";
+            g_lastHeaders = [self allHTTPHeaderFields] ?: @{};
+        } @catch (NSException *e) {}
+        
+        NSString *urlAPI = extractAPIFromURL(url);
+        if (urlAPI && urlAPI.length > 0) {
+            NSLog(@"[ElemeFieldMonitor] API URL detected in setURL: %@", urlAPI);
+        }
+    }
+}
+
+%end
+
+// --- Hook 3d: NSURLConnection (同步请求) ---
+%hook NSURLConnection
+
++ (NSData *)sendSynchronousRequest:(NSURLRequest *)request returningResponse:(NSURLResponse **)response error:(NSError **)error {
+    captureRequestIfNeeded(request);
+    NSData *data = %orig;
+    // 记录响应
+    if (data && data.length > 0) {
+        NSURL *url = request.URL;
+        NSString *api = extractAPIFromURL(url);
+        if (!api) {
+            @try {
+                id bodyJson = [NSJSONSerialization JSONObjectWithData:data options:NSJSONReadingAllowFragments error:nil];
+                if ([bodyJson isKindOfClass:[NSDictionary class]]) {
+                    api = bodyJson[@"api"] ?: bodyJson[@"apiName"];
+                }
+            } @catch (NSException *e) {}
+        }
+        if (api && api.length > 0) {
+            NSString *respStr = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] ?: @"-";
+            NSInteger statusCode = 0;
+            if (response && [*response isKindOfClass:[NSHTTPURLResponse class]]) {
+                statusCode = ((NSHTTPURLResponse *)*response).statusCode;
+            }
+            [[FloatWindowManager sharedInstance] recordAPIResponse:api
+                                                           response:respStr
+                                                          statusCode:statusCode];
+            NSLog(@"[ElemeFieldMonitor] API response (sync) captured: %@", api);
+        }
+    }
+    return data;
+}
+
++ (void)sendAsynchronousRequest:(NSURLRequest *)request queue:(NSOperationQueue *)queue completionHandler:(void (^)(NSURLResponse *, NSData *, NSError *))handler {
+    captureRequestIfNeeded(request);
+    void (^wrappedHandler)(NSURLResponse *, NSData *, NSError *) = ^(NSURLResponse *response, NSData *data, NSError *error) {
+        if (data && data.length > 0) {
+            NSURL *url = request.URL;
+            NSString *api = extractAPIFromURL(url);
+            if (!api) {
+                @try {
+                    id bodyJson = [NSJSONSerialization JSONObjectWithData:data options:NSJSONReadingAllowFragments error:nil];
+                    if ([bodyJson isKindOfClass:[NSDictionary class]]) {
+                        api = bodyJson[@"api"] ?: bodyJson[@"apiName"];
+                    }
+                } @catch (NSException *e) {}
+            }
+            if (api && api.length > 0) {
+                NSString *respStr = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] ?: @"-";
+                NSInteger statusCode = 0;
+                if ([response isKindOfClass:[NSHTTPURLResponse class]]) {
+                    statusCode = ((NSHTTPURLResponse *)response).statusCode;
+                }
+                [[FloatWindowManager sharedInstance] recordAPIResponse:api
+                                                               response:respStr
+                                                              statusCode:statusCode];
+                NSLog(@"[ElemeFieldMonitor] API response (async) captured: %@", api);
+            }
+        }
+        if (handler) handler(response, data, error);
+    };
+    %orig(request, queue, wrappedHandler);
 }
 
 %end
