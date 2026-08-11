@@ -136,12 +136,18 @@ static NSArray *kTargetKeys(void) {
 
 @property (nonatomic, strong) UIButton *exportBtn;
 @property (nonatomic, strong) UIButton *clearButton;
+@property (nonatomic, strong) UIButton *collapseBtn;
+@property (nonatomic, strong) UILabel *urlLabel;
+@property (nonatomic, strong) NSString *lastURL;
+@property (nonatomic, assign) BOOL collapsed;
 
 + (instancetype)sharedInstance;
 - (void)show;
 - (void)hide;
 - (void)toggle;
+- (void)toggleCollapse;
 - (void)updateWithDictionary:(NSDictionary *)dict source:(NSString *)source api:(NSString *)api;
+- (void)updateURL:(NSString *)url;
 - (void)copyAllToClipboard;
 
 @end
@@ -166,6 +172,7 @@ static NSArray *kTargetKeys(void) {
         _captureCount = 0;
         _lastSource = @"-";
         _lastAPI = @"-";
+        _lastURL = @"-";
         // 延迟创建窗口，确保 UIApplication 已就绪
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
@@ -225,7 +232,7 @@ static NSArray *kTargetKeys(void) {
     [self.window addSubview:self.containerView];
 
     // ---- Header ----
-    CGFloat headerH = 70;
+    CGFloat headerH = 88;
     self.headerView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, windowW, headerH)];
     self.headerView.backgroundColor = [UIColor colorWithRed:0.12 green:0.12 blue:0.16 alpha:1.0];
     [self.containerView addSubview:self.headerView];
@@ -236,6 +243,16 @@ static NSArray *kTargetKeys(void) {
     self.titleLabel.textColor = [UIColor colorWithRed:0.3 green:0.6 blue:1.0 alpha:1.0];
     self.titleLabel.font = [UIFont boldSystemFontOfSize:15];
     [self.headerView addSubview:self.titleLabel];
+
+    // Collapse button
+    self.collapseBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    self.collapseBtn.frame = CGRectMake(windowW - 66, 6, 28, 22);
+    [self.collapseBtn setTitle:@"▲" forState:UIControlStateNormal];
+    [self.collapseBtn setTitleColor:[UIColor colorWithRed:0.6 green:0.8 blue:1.0 alpha:1.0]
+                          forState:UIControlStateNormal];
+    self.collapseBtn.titleLabel.font = [UIFont boldSystemFontOfSize:14];
+    [self.collapseBtn addTarget:self action:@selector(toggleCollapse) forControlEvents:UIControlEventTouchUpInside];
+    [self.headerView addSubview:self.collapseBtn];
 
     // Close button
     self.closeButton = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -262,6 +279,16 @@ static NSArray *kTargetKeys(void) {
     self.apiLabel.adjustsFontSizeToFitWidth = YES;
     self.apiLabel.minimumScaleFactor = 0.6;
     [self.headerView addSubview:self.apiLabel];
+
+    // URL line
+    self.urlLabel = [[UILabel alloc] initWithFrame:CGRectMake(12, 66, windowW - 24, 16)];
+    self.urlLabel.text = @"URL: -";
+    self.urlLabel.textColor = [UIColor colorWithRed:0.7 green:0.6 blue:0.9 alpha:1.0];
+    self.urlLabel.font = [UIFont fontWithName:@"Menlo" size:9];
+    self.urlLabel.adjustsFontSizeToFitWidth = YES;
+    self.urlLabel.minimumScaleFactor = 0.5;
+    self.urlLabel.numberOfLines = 1;
+    [self.headerView addSubview:self.urlLabel];
 
     // ---- ScrollView for fields ----
     CGFloat scrollY = headerH;
@@ -377,7 +404,7 @@ static NSArray *kTargetKeys(void) {
 }
 
 - (void)handleDoubleTap:(UITapGestureRecognizer *)gesture {
-    [self toggle];
+    [self toggleCollapse];
 }
 
 - (void)handleLongPress:(UILongPressGestureRecognizer *)gesture {
@@ -419,6 +446,43 @@ static NSArray *kTargetKeys(void) {
     } else {
         [self hide];
     }
+}
+
+- (void)toggleCollapse {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        self.collapsed = !self.collapsed;
+        CGFloat fullH = 380;
+        CGFloat headerH = 88;
+        CGFloat targetH = self.collapsed ? headerH : fullH;
+        CGFloat currentW = self.window.frame.size.width;
+        CGFloat currentX = self.window.frame.origin.x;
+        CGFloat currentY = self.window.frame.origin.y;
+
+        [UIView animateWithDuration:0.25
+                               delay:0
+             usingSpringWithDamping:0.8
+              initialSpringVelocity:0.3
+                            options:UIViewAnimationOptionCurveEaseInOut
+                         animations:^{
+            self.window.frame = CGRectMake(currentX, currentY, currentW, targetH);
+            self.containerView.frame = CGRectMake(0, 0, currentW, targetH);
+            self.scrollView.hidden = self.collapsed;
+            self.footerView.hidden = self.collapsed;
+            [self.collapseBtn setTitle:self.collapsed ? @"▼" : @"▲" forState:UIControlStateNormal];
+        } completion:nil];
+    });
+}
+
+- (void)updateURL:(NSString *)url {
+    if (!url || url.length == 0) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        self.lastURL = url;
+        NSString *display = url;
+        if (display.length > 60) {
+            display = [NSString stringWithFormat:@"%@...", [display substringToIndex:60]];
+        }
+        self.urlLabel.text = [NSString stringWithFormat:@"URL: %@", display];
+    });
 }
 
 #pragma mark - 数据更新
@@ -498,6 +562,7 @@ static NSArray *kTargetKeys(void) {
     json[@"_captureCount"] = @(self.captureCount);
     json[@"_lastSource"] = self.lastSource;
     json[@"_lastAPI"] = self.lastAPI;
+    json[@"_lastURL"] = self.lastURL;
     json[@"_lastUpdate"] = self.lastUpdate ? [self.lastUpdate description] : @"-";
 
     NSData *data = [NSJSONSerialization dataWithJSONObject:json options:NSJSONWritingPrettyPrinted error:nil];
@@ -520,7 +585,9 @@ static NSArray *kTargetKeys(void) {
     self.captureCount = 0;
     self.lastAPI = @"-";
     self.lastSource = @"-";
+    self.lastURL = @"-";
     self.lastUpdate = nil;
+    self.urlLabel.text = @"URL: -";
     [self updateStatusBar];
     [self showToast:@"Cleared!"];
 }
@@ -663,6 +730,11 @@ static NSArray *kTargetKeys(void) {
         [[FloatWindowManager sharedInstance] updateWithDictionary:reqResults
                                                             source:@"Request"
                                                                api:requestAPI];
+    }
+
+    // 更新 URL 显示
+    if (url) {
+        [[FloatWindowManager sharedInstance] updateURL:url.absoluteString];
     }
 
     // ---- 包装 completionHandler 拦截响应 ----
