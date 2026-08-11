@@ -134,7 +134,7 @@ static NSArray *kTargetKeys(void) {
 @property (nonatomic, strong) NSString *lastSource;
 @property (nonatomic, strong) NSDate *lastUpdate;
 
-@property (nonatomic, strong) UIButton *copyButton;
+@property (nonatomic, strong) UIButton *copyAllBtn;
 @property (nonatomic, strong) UIButton *clearButton;
 
 + (instancetype)sharedInstance;
@@ -326,15 +326,15 @@ static NSArray *kTargetKeys(void) {
     [self.containerView addSubview:self.footerView];
 
     // Copy All button
-    self.copyButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    self.copyButton.frame = CGRectMake(12, 6, 140, 28);
-    [self.copyButton setTitle:@"📋 Copy All JSON" forState:UIControlStateNormal];
-    [self.copyButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    self.copyButton.titleLabel.font = [UIFont systemFontOfSize:12];
-    self.copyButton.backgroundColor = [UIColor colorWithRed:0.15 green:0.4 blue:0.8 alpha:0.8];
-    self.copyButton.layer.cornerRadius = 6;
-    [self.copyButton addTarget:self action:@selector(copyAllToClipboard) forControlEvents:UIControlEventTouchUpInside];
-    [self.footerView addSubview:self.copyButton];
+    self.copyAllBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    self.copyAllBtn.frame = CGRectMake(12, 6, 140, 28);
+    [self.copyAllBtn setTitle:@"📋 Copy All JSON" forState:UIControlStateNormal];
+    [self.copyAllBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    self.copyAllBtn.titleLabel.font = [UIFont systemFontOfSize:12];
+    self.copyAllBtn.backgroundColor = [UIColor colorWithRed:0.15 green:0.4 blue:0.8 alpha:0.8];
+    self.copyAllBtn.layer.cornerRadius = 6;
+    [self.copyAllBtn addTarget:self action:@selector(copyAllToClipboard) forControlEvents:UIControlEventTouchUpInside];
+    [self.footerView addSubview:self.copyAllBtn];
 
     // Clear button
     self.clearButton = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -732,7 +732,7 @@ static NSArray *kTargetKeys(void) {
 - (void)setObject:(id)anObject forKey:(id<NSCopying>)aKey {
     %orig;
 
-    if ([aKey isKindOfClass:[NSString class]] && [kTargetKeys() containsObject:(NSString *)aKey]) {
+    if ([(id)aKey isKindOfClass:[NSString class]] && [kTargetKeys() containsObject:(NSString *)aKey]) {
         NSString *key = (NSString *)aKey;
         NSString *value = [NSString stringWithFormat:@"%@", anObject];
         if (value.length > 0 && ![value isEqualToString:@"(null)"] && 
