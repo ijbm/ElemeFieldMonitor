@@ -221,7 +221,7 @@ static NSDictionary *g_lastHeaders = nil;
 @property (nonatomic, strong) NSString *lastURL;
 @property (nonatomic, strong) NSString *lastCookie;
 @property (nonatomic, assign) BOOL collapsed;
-@property (nonatomic, strong) NSMutableDictionary *pendingRequests;
+@property (nonatomic, strong) NSMutableArray *pendingRequests; // 每个 pending 请求 dict, 含 _api key
 @property (nonatomic, strong) NSMutableArray *harEntries;
 
 + (instancetype)sharedInstance;
@@ -307,7 +307,7 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
         _lastAPI = @"-";
         _lastURL = @"-";
         _lastCookie = @"-";
-        _pendingRequests = [NSMutableDictionary dictionary];
+        _pendingRequests = [NSMutableArray array];
         _harEntries = [NSMutableArray array];
         // 延迟创建窗口，确保 UIApplication 已就绪
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
@@ -984,8 +984,8 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
         [cleanEntry removeObjectForKey:@"_api"];
         [allEntries addObject:cleanEntry];
     }
-    for (NSString *api in self.pendingRequests) {
-        NSDictionary *req = self.pendingRequests[api];
+    for (NSDictionary *req in self.pendingRequests) {
+        NSString *api = req[@"_api"] ?: @"unknown";
         NSMutableDictionary *entry = [NSMutableDictionary dictionary];
         entry[@"startedDateTime"] = req[@"_timestamp"] ?: @"1970-01-01T00:00:00.000Z";
         entry[@"time"] = @0;
@@ -1037,7 +1037,11 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
 
     // 写入临时 .har 文件
     NSString *tempDir = NSTemporaryDirectory();
-    NSString *fileName = [NSString stringWithFormat:@"eleme_%ld.har", (long)[[NSDate date] timeIntervalSince1970]];
+    NSDateFormatter *fileFmt = [[NSDateFormatter alloc] init];
+    fileFmt.dateFormat = @"yyyyMMdd_HHmmss";
+    fileFmt.timeZone = [NSTimeZone localTimeZone];
+    fileFmt.locale = [[NSLocale alloc] initWithLocaleIdentifier:@"en_US_POSIX"];
+    NSString *fileName = [NSString stringWithFormat:@"eleme_%@.har", [fileFmt stringFromDate:[NSDate date]]];
     NSString *filePath = [tempDir stringByAppendingPathComponent:fileName];
     [data writeToFile:filePath atomically:YES];
 
@@ -1090,7 +1094,7 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
     if (!api || api.length == 0) return;
     dispatch_async(dispatch_get_main_queue(), ^{
         NSMutableDictionary *req = [NSMutableDictionary dictionary];
-        req[@"api"] = api;
+        req[@"_api"] = api;
         req[@"url"] = url ?: @"-";
         req[@"method"] = method ?: @"GET";
         req[@"headers"] = headers ?: @{};
@@ -1101,17 +1105,39 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
         isoFmt.timeZone = [NSTimeZone timeZoneWithAbbreviation:@"UTC"];
         isoFmt.locale = [[NSLocale alloc] initWithLocaleIdentifier:@"en_US_POSIX"];
         req[@"_timestamp"] = [isoFmt stringFromDate:[NSDate date]];
-        // 存入 pendingRequests，等待响应配对
-        self.pendingRequests[api] = req;
-        NSLog(@"[ElemeFieldMonitor] API request pending: %@", api);
+        // 追加到 pendingRequests 数组，等待响应配对 (FIFO)
+        [self.pendingRequests addObject:req];
+        NSLog(@"[ElemeFieldMonitor] API request pending (#%lu): %@", (unsigned long)self.pendingRequests.count, api);
     });
 }
 
 - (void)recordAPIResponse:(NSString *)api response:(NSString *)response statusCode:(NSInteger)code {
     if (!api || api.length == 0) return;
     dispatch_async(dispatch_get_main_queue(), ^{
-        // 查找 pending request
-        NSDictionary *pendingReq = self.pendingRequests[api];
+        // FIFO 查找匹配的 pending request
+        NSDictionary *pendingReq = nil;
+        NSInteger pendingIdx = -1;
+        for (NSInteger i = 0; i < (NSInteger)self.pendingRequests.count; i++) {
+            NSDictionary *pr = self.pendingRequests[i];
+            if ([pr[@"_api"] isEqualToString:api]) {
+                pendingReq = pr;
+                pendingIdx = i;
+                break;
+            }
+        }
+        
+        // 如果没有匹配的 pending request，创建一个仅含响应的条目
+        if (!pendingReq) {
+            NSLog(@"[ElemeFieldMonitor] Response without pending request: %@ (creating response-only entry)", api);
+            pendingReq = @{
+                @"_api": api,
+                @"url": @"-",
+                @"method": @"?",
+                @"headers": @{},
+                @"body": @"",
+                @"_timestamp": @"1970-01-01T00:00:00.000Z"
+            };
+        }
         
         NSMutableDictionary *entry = [NSMutableDictionary dictionary];
         entry[@"_api"] = api; // 仅供 UI 显示，导出时移除
@@ -1156,9 +1182,11 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
         entry[@"timings"] = @{@"send": @(-1), @"wait": @(-1), @"receive": @(-1)};
         
         [self.harEntries addObject:entry];
-        // 移除 pending request
-        [self.pendingRequests removeObjectForKey:api];
-        NSLog(@"[ElemeFieldMonitor] HAR entry #%ld: %@", (long)self.harEntries.count, api);
+        // 移除已配对的 pending request
+        if (pendingIdx >= 0) {
+            [self.pendingRequests removeObjectAtIndex:pendingIdx];
+        }
+        NSLog(@"[ElemeFieldMonitor] HAR entry #%ld: %@ (pending remaining: %lu)", (long)self.harEntries.count, api, (unsigned long)self.pendingRequests.count);
         // 如果当前在 HAR tab，刷新列表
         if (self.activeTab == 1) {
             [self refreshHarList];
@@ -1379,8 +1407,8 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
 
         // Pending requests (未配对)
         NSInteger pendingIdx = (NSInteger)self.harEntries.count;
-        for (NSString *apiName in self.pendingRequests) {
-            NSDictionary *req = self.pendingRequests[apiName];
+        for (NSDictionary *req in self.pendingRequests) {
+            NSString *apiName = req[@"_api"] ?: @"unknown";
             NSString *method = req[@"method"] ?: @"?";
             NSString *url = req[@"url"] ?: @"-";
             NSString *bodyStr = req[@"body"] ?: @"";
