@@ -2758,9 +2758,9 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
 %end
 
 // ============================================================================
-// MARK: - Crypto Hooks (哈希/HMAC/加解密) - 暂时禁用排查闪退
+// MARK: - Crypto Hooks (哈希/HMAC/加解密) - 逐步启用排查闪退
 // ============================================================================
-#if 0  // CRYPTO_HOOKS_DISABLED
+#if 1  // CRYPTO_HOOKS_ENABLED
 
 // 辅助函数: NSData -> hex 字符串 (限制最大 1024 字节)
 static NSString *dataToHex(NSData *data) {
@@ -2906,7 +2906,8 @@ static NSString *dataToString(NSData *data) {
     return result;
 }
 
-// --- Hook: CCHmac ---
+// --- Hook: CCHmac (暂时禁用排查闪退) ---
+#if 0  // HMAC_DISABLED
 // 用静态字典存储 ctx 指针对应的算法名和密钥 (CCHmacContext 是 C 结构体，不能用 objc_setAssociatedObject)
 static NSMutableDictionary *g_hmacContexts = nil;
 
@@ -2972,8 +2973,10 @@ static NSMutableDictionary *g_hmacContexts = nil;
         } @catch (NSException *e) {}
     }
 }
+#endif  // HMAC_DISABLED
 
-// --- Hook: CCCrypt (AES/DES/3DES/RC4/RC2/Blowfish) ---
+// --- Hook: CCCrypt (AES/DES/3DES/RC4/RC2/Blowfish) (暂时禁用排查闪退) ---
+#if 0  // CCCRYPT_DISABLED
 %hookf(CCCryptorStatus, CCCrypt, CCOperation op, CCAlgorithm alg, CCOptions options, const void *key, size_t keyLength, const void *iv, size_t ivLength, const void *dataIn, size_t dataInLength, void *dataOut, size_t dataOutAvailable, size_t *dataOutMoved) {
     CCCryptorStatus status = %orig;
     if (g_cryptoReady && status == kCCSuccess) {
@@ -3025,8 +3028,9 @@ static NSMutableDictionary *g_hmacContexts = nil;
     }
     return status;
 }
+#endif  // CCCRYPT_DISABLED
 
-#endif  // CRYPTO_HOOKS_DISABLED
+#endif  // CRYPTO_HOOKS_ENABLED
 
 // ============================================================================
 // MARK: - 构造函数
