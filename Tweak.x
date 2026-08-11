@@ -977,13 +977,18 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
         return;
     }
     // 将 pendingRequests 中未配对的请求也作为条目输出
-    NSMutableArray *allEntries = [self.harEntries mutableCopy];
+    NSMutableArray *allEntries = [NSMutableArray array];
+    // 先添加已配对的 entries，移除 _api 非标准字段
+    for (NSDictionary *e in self.harEntries) {
+        NSMutableDictionary *cleanEntry = [e mutableCopy];
+        [cleanEntry removeObjectForKey:@"_api"];
+        [allEntries addObject:cleanEntry];
+    }
     for (NSString *api in self.pendingRequests) {
         NSDictionary *req = self.pendingRequests[api];
         NSMutableDictionary *entry = [NSMutableDictionary dictionary];
-        entry[@"startedDateTime"] = req[@"_timestamp"] ?: [[NSDate date] description];
+        entry[@"startedDateTime"] = req[@"_timestamp"] ?: @"1970-01-01T00:00:00.000Z";
         entry[@"time"] = @0;
-        entry[@"_api"] = api;
         // request
         NSMutableDictionary *harReq = [NSMutableDictionary dictionary];
         harReq[@"method"] = req[@"method"] ?: @"GET";
@@ -1017,7 +1022,7 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
             @"bodySize": @0
         };
         entry[@"cache"] = @{};
-        entry[@"timings"] = @{@"send": @0, @"wait": @0, @"receive": @0};
+        entry[@"timings"] = @{@"send": @(-1), @"wait": @(-1), @"receive": @(-1)};
         [allEntries addObject:entry];
     }
 
@@ -1028,16 +1033,11 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
             @"entries": allEntries
         }
     };
-    NSData *data = [NSJSONSerialization dataWithJSONObject:har options:NSJSONWritingPrettyPrinted error:nil];
+    NSData *data = [NSJSONSerialization dataWithJSONObject:har options:0 error:nil];
 
     // 写入临时 .har 文件
     NSString *tempDir = NSTemporaryDirectory();
-    NSString *fileName = [NSString stringWithFormat:@"eleme_%@.har",
-                          [[NSDate date] descriptionWithLocale:[NSLocale currentLocale]]
-                          ?: [NSString stringWithFormat:@"%ld", (long)[[NSDate date] timeIntervalSince1970]]];
-    // 清理文件名中的非法字符
-    NSCharacterSet *illegalChars = [NSCharacterSet characterSetWithCharactersInString:@":/\\ "];
-    fileName = [[fileName componentsSeparatedByCharactersInSet:illegalChars] componentsJoinedByString:@"_"];
+    NSString *fileName = [NSString stringWithFormat:@"eleme_%ld.har", (long)[[NSDate date] timeIntervalSince1970]];
     NSString *filePath = [tempDir stringByAppendingPathComponent:fileName];
     [data writeToFile:filePath atomically:YES];
 
@@ -1095,7 +1095,12 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
         req[@"method"] = method ?: @"GET";
         req[@"headers"] = headers ?: @{};
         req[@"body"] = body ?: @"-";
-        req[@"_timestamp"] = [[NSDate date] description];
+        // ISO 8601 格式: 2026-08-11T08:22:11.000Z
+        NSDateFormatter *isoFmt = [[NSDateFormatter alloc] init];
+        isoFmt.dateFormat = @"yyyy-MM-dd'T'HH:mm:ss.SSS'Z'";
+        isoFmt.timeZone = [NSTimeZone timeZoneWithAbbreviation:@"UTC"];
+        isoFmt.locale = [[NSLocale alloc] initWithLocaleIdentifier:@"en_US_POSIX"];
+        req[@"_timestamp"] = [isoFmt stringFromDate:[NSDate date]];
         // 存入 pendingRequests，等待响应配对
         self.pendingRequests[api] = req;
         NSLog(@"[ElemeFieldMonitor] API request pending: %@", api);
@@ -1109,8 +1114,8 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
         NSDictionary *pendingReq = self.pendingRequests[api];
         
         NSMutableDictionary *entry = [NSMutableDictionary dictionary];
-        entry[@"_api"] = api;
-        entry[@"startedDateTime"] = pendingReq[@"_timestamp"] ?: [[NSDate date] description];
+        entry[@"_api"] = api; // 仅供 UI 显示，导出时移除
+        entry[@"startedDateTime"] = pendingReq[@"_timestamp"] ?: @"1970-01-01T00:00:00.000Z";
         entry[@"time"] = @0;
         
         // build request part
@@ -1148,7 +1153,7 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
             @"bodySize": @(respSize)
         };
         entry[@"cache"] = @{};
-        entry[@"timings"] = @{@"send": @0, @"wait": @0, @"receive": @0};
+        entry[@"timings"] = @{@"send": @(-1), @"wait": @(-1), @"receive": @(-1)};
         
         [self.harEntries addObject:entry];
         // 移除 pending request
