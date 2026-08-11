@@ -2762,6 +2762,24 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
 // ============================================================================
 #if 1  // CRYPTO_HOOKS_ENABLED
 
+// 频率限制: 每秒最多记录 10 条 crypto 操作
+static volatile int32_t g_cryptoCountInLastSec = 0;
+static volatile NSTimeInterval g_cryptoLastReset = 0;
+
+static BOOL cryptoRateLimitAllow(void) {
+    NSTimeInterval now = CFAbsoluteTimeGetCurrent();
+    if (now - g_cryptoLastReset >= 1.0) {
+        g_cryptoLastReset = now;
+        g_cryptoCountInLastSec = 0;
+    }
+    if (g_cryptoCountInLastSec >= 10) return NO;
+    __sync_fetch_and_add(&g_cryptoCountInLastSec, 1);
+    return YES;
+}
+
+// 输入长度上限: 超过 64KB 不记录
+#define CRYPTO_MAX_INPUT_LEN 65536
+
 // 辅助函数: NSData -> hex 字符串 (限制最大 1024 字节)
 static NSString *dataToHex(NSData *data) {
     if (!data || data.length == 0) return @"";
@@ -2789,7 +2807,7 @@ static NSString *dataToString(NSData *data) {
 // --- Hook: CC_MD5 ---
 %hookf(unsigned char *, CC_MD5, const void *data, CC_LONG len, unsigned char *md) {
     unsigned char *result = %orig;
-    if (g_cryptoReady && result && data && len > 0) {
+    if (g_cryptoReady && result && data && len > 0 && len <= CRYPTO_MAX_INPUT_LEN && cryptoRateLimitAllow()) {
         @try {
             NSData *inputData = [NSData dataWithBytes:data length:len];
             NSData *outputData = [NSData dataWithBytes:result length:CC_MD5_DIGEST_LENGTH];
@@ -2809,7 +2827,7 @@ static NSString *dataToString(NSData *data) {
 // --- Hook: CC_SHA1 ---
 %hookf(unsigned char *, CC_SHA1, const void *data, CC_LONG len, unsigned char *md) {
     unsigned char *result = %orig;
-    if (g_cryptoReady && result && data && len > 0) {
+    if (g_cryptoReady && result && data && len > 0 && len <= CRYPTO_MAX_INPUT_LEN && cryptoRateLimitAllow()) {
         @try {
             NSData *inputData = [NSData dataWithBytes:data length:len];
             NSData *outputData = [NSData dataWithBytes:result length:CC_SHA1_DIGEST_LENGTH];
@@ -2829,7 +2847,7 @@ static NSString *dataToString(NSData *data) {
 // --- Hook: CC_SHA256 ---
 %hookf(unsigned char *, CC_SHA256, const void *data, CC_LONG len, unsigned char *md) {
     unsigned char *result = %orig;
-    if (g_cryptoReady && result && data && len > 0) {
+    if (g_cryptoReady && result && data && len > 0 && len <= CRYPTO_MAX_INPUT_LEN && cryptoRateLimitAllow()) {
         @try {
             NSData *inputData = [NSData dataWithBytes:data length:len];
             NSData *outputData = [NSData dataWithBytes:result length:CC_SHA256_DIGEST_LENGTH];
@@ -2849,7 +2867,7 @@ static NSString *dataToString(NSData *data) {
 // --- Hook: CC_SHA512 ---
 %hookf(unsigned char *, CC_SHA512, const void *data, CC_LONG len, unsigned char *md) {
     unsigned char *result = %orig;
-    if (g_cryptoReady && result && data && len > 0) {
+    if (g_cryptoReady && result && data && len > 0 && len <= CRYPTO_MAX_INPUT_LEN && cryptoRateLimitAllow()) {
         @try {
             NSData *inputData = [NSData dataWithBytes:data length:len];
             NSData *outputData = [NSData dataWithBytes:result length:CC_SHA512_DIGEST_LENGTH];
@@ -2869,7 +2887,7 @@ static NSString *dataToString(NSData *data) {
 // --- Hook: CC_SHA224 ---
 %hookf(unsigned char *, CC_SHA224, const void *data, CC_LONG len, unsigned char *md) {
     unsigned char *result = %orig;
-    if (g_cryptoReady && result && data && len > 0) {
+    if (g_cryptoReady && result && data && len > 0 && len <= CRYPTO_MAX_INPUT_LEN && cryptoRateLimitAllow()) {
         @try {
             NSData *inputData = [NSData dataWithBytes:data length:len];
             NSData *outputData = [NSData dataWithBytes:result length:CC_SHA224_DIGEST_LENGTH];
@@ -2889,7 +2907,7 @@ static NSString *dataToString(NSData *data) {
 // --- Hook: CC_SHA384 ---
 %hookf(unsigned char *, CC_SHA384, const void *data, CC_LONG len, unsigned char *md) {
     unsigned char *result = %orig;
-    if (g_cryptoReady && result && data && len > 0) {
+    if (g_cryptoReady && result && data && len > 0 && len <= CRYPTO_MAX_INPUT_LEN && cryptoRateLimitAllow()) {
         @try {
             NSData *inputData = [NSData dataWithBytes:data length:len];
             NSData *outputData = [NSData dataWithBytes:result length:CC_SHA384_DIGEST_LENGTH];
