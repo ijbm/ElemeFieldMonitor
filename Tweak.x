@@ -2762,6 +2762,9 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
 // ============================================================================
 #if 1  // CRYPTO_HOOKS_ENABLED
 
+// 重入保护: 防止 hook 代码内部的 ObjC 操作再次触发 crypto 函数导致无限递归
+static __thread volatile BOOL g_cryptoInHook = NO;
+
 // 频率限制: 每秒最多记录 10 条 crypto 操作
 static volatile int32_t g_cryptoCountInLastSec = 0;
 static volatile NSTimeInterval g_cryptoLastReset = 0;
@@ -2807,7 +2810,8 @@ static NSString *dataToString(NSData *data) {
 // --- Hook: CC_MD5 ---
 %hookf(unsigned char *, CC_MD5, const void *data, CC_LONG len, unsigned char *md) {
     unsigned char *result = %orig;
-    if (g_cryptoReady && result && data && len > 0 && len <= CRYPTO_MAX_INPUT_LEN && cryptoRateLimitAllow()) {
+    if (g_cryptoReady && !g_cryptoInHook && result && data && len > 0 && len <= CRYPTO_MAX_INPUT_LEN && cryptoRateLimitAllow()) {
+        g_cryptoInHook = YES;
         @try {
             NSData *inputData = [NSData dataWithBytes:data length:len];
             NSData *outputData = [NSData dataWithBytes:result length:CC_MD5_DIGEST_LENGTH];
@@ -2820,6 +2824,7 @@ static NSString *dataToString(NSData *data) {
                                                                     key:@""
                                                                     iv:@""];
         } @catch (NSException *e) {}
+        g_cryptoInHook = NO;
     }
     return result;
 }
@@ -2827,7 +2832,8 @@ static NSString *dataToString(NSData *data) {
 // --- Hook: CC_SHA1 ---
 %hookf(unsigned char *, CC_SHA1, const void *data, CC_LONG len, unsigned char *md) {
     unsigned char *result = %orig;
-    if (g_cryptoReady && result && data && len > 0 && len <= CRYPTO_MAX_INPUT_LEN && cryptoRateLimitAllow()) {
+    if (g_cryptoReady && !g_cryptoInHook && result && data && len > 0 && len <= CRYPTO_MAX_INPUT_LEN && cryptoRateLimitAllow()) {
+        g_cryptoInHook = YES;
         @try {
             NSData *inputData = [NSData dataWithBytes:data length:len];
             NSData *outputData = [NSData dataWithBytes:result length:CC_SHA1_DIGEST_LENGTH];
@@ -2840,6 +2846,7 @@ static NSString *dataToString(NSData *data) {
                                                                     key:@""
                                                                     iv:@""];
         } @catch (NSException *e) {}
+        g_cryptoInHook = NO;
     }
     return result;
 }
@@ -2847,7 +2854,8 @@ static NSString *dataToString(NSData *data) {
 // --- Hook: CC_SHA256 ---
 %hookf(unsigned char *, CC_SHA256, const void *data, CC_LONG len, unsigned char *md) {
     unsigned char *result = %orig;
-    if (g_cryptoReady && result && data && len > 0 && len <= CRYPTO_MAX_INPUT_LEN && cryptoRateLimitAllow()) {
+    if (g_cryptoReady && !g_cryptoInHook && result && data && len > 0 && len <= CRYPTO_MAX_INPUT_LEN && cryptoRateLimitAllow()) {
+        g_cryptoInHook = YES;
         @try {
             NSData *inputData = [NSData dataWithBytes:data length:len];
             NSData *outputData = [NSData dataWithBytes:result length:CC_SHA256_DIGEST_LENGTH];
@@ -2860,6 +2868,7 @@ static NSString *dataToString(NSData *data) {
                                                                     key:@""
                                                                     iv:@""];
         } @catch (NSException *e) {}
+        g_cryptoInHook = NO;
     }
     return result;
 }
@@ -2867,7 +2876,8 @@ static NSString *dataToString(NSData *data) {
 // --- Hook: CC_SHA512 ---
 %hookf(unsigned char *, CC_SHA512, const void *data, CC_LONG len, unsigned char *md) {
     unsigned char *result = %orig;
-    if (g_cryptoReady && result && data && len > 0 && len <= CRYPTO_MAX_INPUT_LEN && cryptoRateLimitAllow()) {
+    if (g_cryptoReady && !g_cryptoInHook && result && data && len > 0 && len <= CRYPTO_MAX_INPUT_LEN && cryptoRateLimitAllow()) {
+        g_cryptoInHook = YES;
         @try {
             NSData *inputData = [NSData dataWithBytes:data length:len];
             NSData *outputData = [NSData dataWithBytes:result length:CC_SHA512_DIGEST_LENGTH];
@@ -2880,6 +2890,7 @@ static NSString *dataToString(NSData *data) {
                                                                     key:@""
                                                                     iv:@""];
         } @catch (NSException *e) {}
+        g_cryptoInHook = NO;
     }
     return result;
 }
@@ -2887,7 +2898,8 @@ static NSString *dataToString(NSData *data) {
 // --- Hook: CC_SHA224 ---
 %hookf(unsigned char *, CC_SHA224, const void *data, CC_LONG len, unsigned char *md) {
     unsigned char *result = %orig;
-    if (g_cryptoReady && result && data && len > 0 && len <= CRYPTO_MAX_INPUT_LEN && cryptoRateLimitAllow()) {
+    if (g_cryptoReady && !g_cryptoInHook && result && data && len > 0 && len <= CRYPTO_MAX_INPUT_LEN && cryptoRateLimitAllow()) {
+        g_cryptoInHook = YES;
         @try {
             NSData *inputData = [NSData dataWithBytes:data length:len];
             NSData *outputData = [NSData dataWithBytes:result length:CC_SHA224_DIGEST_LENGTH];
@@ -2900,6 +2912,7 @@ static NSString *dataToString(NSData *data) {
                                                                     key:@""
                                                                     iv:@""];
         } @catch (NSException *e) {}
+        g_cryptoInHook = NO;
     }
     return result;
 }
@@ -2907,7 +2920,8 @@ static NSString *dataToString(NSData *data) {
 // --- Hook: CC_SHA384 ---
 %hookf(unsigned char *, CC_SHA384, const void *data, CC_LONG len, unsigned char *md) {
     unsigned char *result = %orig;
-    if (g_cryptoReady && result && data && len > 0 && len <= CRYPTO_MAX_INPUT_LEN && cryptoRateLimitAllow()) {
+    if (g_cryptoReady && !g_cryptoInHook && result && data && len > 0 && len <= CRYPTO_MAX_INPUT_LEN && cryptoRateLimitAllow()) {
+        g_cryptoInHook = YES;
         @try {
             NSData *inputData = [NSData dataWithBytes:data length:len];
             NSData *outputData = [NSData dataWithBytes:result length:CC_SHA384_DIGEST_LENGTH];
@@ -2920,6 +2934,7 @@ static NSString *dataToString(NSData *data) {
                                                                     key:@""
                                                                     iv:@""];
         } @catch (NSException *e) {}
+        g_cryptoInHook = NO;
     }
     return result;
 }
