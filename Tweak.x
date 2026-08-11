@@ -45,9 +45,24 @@ static NSArray *kTargetKeys(void) {
 + (void)searchInURL:(NSURL *)url results:(NSMutableDictionary *)results;
 /** 搜索 HTTP body (JSON) 中的目标字段 */
 + (void)searchInBody:(NSData *)body results:(NSMutableDictionary *)results;
+/** 验证值是否有效 (过滤模板变量等) */
++ (BOOL)isValidValue:(NSString *)str;
 @end
 
 @implementation FieldHunter
+
++ (BOOL)isValidValue:(NSString *)str {
+    if (!str || str.length == 0) return NO;
+    if ([str isEqualToString:@"(null)"]) return NO;
+    // 过滤 Mist 模板变量
+    if ([str hasPrefix:@"$:"]) return NO;
+    if ([str hasPrefix:@"@query."]) return NO;
+    if ([str hasPrefix:@"@path."]) return NO;
+    if ([str hasPrefix:@"${"]) return NO;
+    // 过滤过于短的值 (单字符如 "new" "all" 对 sceneCode 无意义)
+    if (str.length < 2) return NO;
+    return YES;
+}
 
 + (void)searchInObject:(id)obj results:(NSMutableDictionary *)results {
     if (!obj || !results) return;
@@ -55,12 +70,14 @@ static NSArray *kTargetKeys(void) {
     if ([obj isKindOfClass:[NSDictionary class]]) {
         NSDictionary *dict = (NSDictionary *)obj;
         for (NSString *key in kTargetKeys()) {
-            // 支持嵌套 key (如 svip.encryptSceneCode)
             id value = dict[key];
             if (value && ![value isKindOfClass:[NSNull class]]) {
                 NSString *strValue = [NSString stringWithFormat:@"%@", value];
-                if (strValue.length > 0 && ![strValue isEqualToString:@"(null)"]) {
-                    results[key] = strValue;
+                if ([self isValidValue:strValue]) {
+                    // 不覆盖已找到的真实值
+                    if (!results[key]) {
+                        results[key] = strValue;
+                    }
                 }
             }
         }
@@ -88,8 +105,10 @@ static NSArray *kTargetKeys(void) {
             NSString *value = [[kv subarrayWithRange:NSMakeRange(1, kv.count - 1)]
                 componentsJoinedByString:@"="];
             value = [value stringByRemovingPercentEncoding];
-            if ([kTargetKeys() containsObject:key] && value.length > 0) {
-                results[key] = value;
+            if ([kTargetKeys() containsObject:key] && [self isValidValue:value]) {
+                if (!results[key]) {
+                    results[key] = value;
+                }
             }
         }
     }
@@ -541,12 +560,21 @@ static NSArray *kTargetKeys(void) {
             }
         }
 
+        // 只有当至少捕获到 2 个字段时才记录历史
+        NSInteger capturedFields = 0;
+        for (NSString *key in kTargetKeys()) {
+            if (self.fieldValues[key]) capturedFields++;
+        }
+        
         if (hasNewData || api) {
             self.captureCount += 1;
             self.lastUpdate = [NSDate date];
             if (api) self.lastAPI = api;
             if (source) self.lastSource = source;
-            [self saveHistorySnapshot:source api:api];
+            // 只有有价值的记录才保存历史
+            if (capturedFields >= 2 || hasNewData) {
+                [self saveHistorySnapshot:source api:api];
+            }
             [self updateStatusBar];
         }
     });
