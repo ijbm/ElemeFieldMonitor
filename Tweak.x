@@ -13,11 +13,7 @@
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
-#import <CommonCrypto/CommonCrypto.h>
-#import <dlfcn.h>
 
-// 安全标志: FloatWindowManager 初始化完成后才记录 crypto 操作
-static volatile BOOL g_cryptoReady = NO;
 
 // ============================================================================
 // MARK: - 目标字段定义
@@ -197,15 +193,10 @@ static NSDictionary *g_lastHeaders = nil;
 @property (nonatomic, strong) UIScrollView *harScrollView;
 @property (nonatomic, strong) UIButton *tabFieldsBtn;
 @property (nonatomic, strong) UIButton *tabHarBtn;
-@property (nonatomic, strong) UIButton *tabCryptoBtn;
 @property (nonatomic, strong) UIView *tabFieldsIndicator;
 @property (nonatomic, strong) UIView *tabHarIndicator;
-@property (nonatomic, strong) UIView *tabCryptoIndicator;
-@property (nonatomic, assign) NSInteger activeTab; // 0=fields, 1=har, 2=crypto
+@property (nonatomic, assign) NSInteger activeTab; // 0=fields, 1=har
 @property (nonatomic, strong) UIView *detailOverlayView;
-
-@property (nonatomic, strong) UIScrollView *cryptoScrollView;
-@property (nonatomic, strong) NSMutableArray *cryptoRecords;
 
 @property (nonatomic, strong) UILabel *titleLabel;
 @property (nonatomic, strong) UILabel *statusLabel;
@@ -251,18 +242,11 @@ static NSDictionary *g_lastHeaders = nil;
 - (void)refreshHarList;
 - (void)tabFieldsTapped;
 - (void)tabHarTapped;
-- (void)tabCryptoTapped;
-- (void)clearHar;
-- (void)clearCrypto;
-- (void)refreshCryptoList;
-- (void)exportCrypto;
-- (void)recordCryptoOperation:(NSString *)algorithm type:(NSString *)type input:(NSString *)input output:(NSString *)output key:(NSString *)key iv:(NSString *)iv;
 - (void)showHarDetail:(NSDictionary *)entry;
 - (void)dismissHarDetail;
 - (void)handleHarCardTap:(UITapGestureRecognizer *)gesture;
 - (void)copyHarRequest:(UIButton *)btn;
 - (void)copyHarResponse:(UIButton *)btn;
-- (void)handleCryptoLongPress:(UILongPressGestureRecognizer *)gesture;
 
 @end
 
@@ -325,13 +309,6 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
         _lastCookie = @"-";
         _pendingRequests = [NSMutableArray array];
         _harEntries = [NSMutableArray array];
-        _cryptoRecords = [NSMutableArray array];
-        // 延迟 3 秒启用 crypto hook，确保 app 完全启动后再捕获
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            g_cryptoReady = YES;
-            NSLog(@"[ElemeFieldMonitor] Crypto hooks activated");
-        });
         // 延迟创建窗口，确保 UIApplication 已就绪
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
@@ -461,7 +438,7 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
     tabDivider.backgroundColor = dividerColor;
     [self.tabBarView addSubview:tabDivider];
 
-    CGFloat tabW = windowW / 3;
+    CGFloat tabW = windowW / 2;
     self.tabFieldsBtn = [UIButton buttonWithType:UIButtonTypeSystem];
     self.tabFieldsBtn.frame = CGRectMake(0, 0, tabW, tabH);
     [self.tabFieldsBtn setTitle:@"Fields" forState:UIControlStateNormal];
@@ -478,14 +455,6 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
     [self.tabHarBtn addTarget:self action:@selector(tabHarTapped) forControlEvents:UIControlEventTouchUpInside];
     [self.tabBarView addSubview:self.tabHarBtn];
 
-    self.tabCryptoBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    self.tabCryptoBtn.frame = CGRectMake(tabW * 2, 0, tabW, tabH);
-    [self.tabCryptoBtn setTitle:@"Crypto" forState:UIControlStateNormal];
-    [self.tabCryptoBtn setTitleColor:tabInactiveColor forState:UIControlStateNormal];
-    self.tabCryptoBtn.titleLabel.font = [UIFont boldSystemFontOfSize:12];
-    [self.tabCryptoBtn addTarget:self action:@selector(tabCryptoTapped) forControlEvents:UIControlEventTouchUpInside];
-    [self.tabBarView addSubview:self.tabCryptoBtn];
-
     // Tab indicators (底部色条)
     self.tabFieldsIndicator = [[UIView alloc] initWithFrame:CGRectMake(tabW / 2 - 20, tabH - 3, 40, 3)];
     self.tabFieldsIndicator.backgroundColor = tabActiveColor;
@@ -497,12 +466,6 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
     self.tabHarIndicator.layer.cornerRadius = 1.5;
     self.tabHarIndicator.alpha = 0;
     [self.tabBarView addSubview:self.tabHarIndicator];
-
-    self.tabCryptoIndicator = [[UIView alloc] initWithFrame:CGRectMake(tabW * 2 + tabW / 2 - 20, tabH - 3, 40, 3)];
-    self.tabCryptoIndicator.backgroundColor = tabActiveColor;
-    self.tabCryptoIndicator.layer.cornerRadius = 1.5;
-    self.tabCryptoIndicator.alpha = 0;
-    [self.tabBarView addSubview:self.tabCryptoIndicator];
 
     // ---- Content area ----
     CGFloat footerH = 44;
@@ -698,23 +661,6 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
 
     self.harScrollView.contentSize = CGSizeMake(windowW, contentH);
 
-    // === Crypto ScrollView ===
-    self.cryptoScrollView = [[UIScrollView alloc] initWithFrame:CGRectMake(0, contentY, windowW, contentH)];
-    self.cryptoScrollView.backgroundColor = [UIColor clearColor];
-    self.cryptoScrollView.showsVerticalScrollIndicator = YES;
-    self.cryptoScrollView.alwaysBounceVertical = YES;
-    self.cryptoScrollView.hidden = YES;
-    [self.containerView addSubview:self.cryptoScrollView];
-
-    UILabel *cryptoEmpty = [[UILabel alloc] initWithFrame:CGRectMake(0, contentH / 2 - 30, windowW, 30)];
-    cryptoEmpty.text = @"No crypto operations yet";
-    cryptoEmpty.textColor = [UIColor colorWithRed:0.35 green:0.35 blue:0.40 alpha:1.0];
-    cryptoEmpty.font = [UIFont systemFontOfSize:13];
-    cryptoEmpty.textAlignment = NSTextAlignmentCenter;
-    cryptoEmpty.tag = 998;
-    [self.cryptoScrollView addSubview:cryptoEmpty];
-    self.cryptoScrollView.contentSize = CGSizeMake(windowW, contentH);
-
     // ---- Footer (44px) ----
     CGFloat footerY = windowH - footerH;
     self.footerView = [[UIView alloc] initWithFrame:CGRectMake(0, footerY, windowW, footerH)];
@@ -788,31 +734,6 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
     harClearBtn.tag = 888;
     harClearBtn.hidden = YES;
     [self.footerView addSubview:harClearBtn];
-
-    // Crypto footer buttons (hidden by default)
-    UIButton *cryptoExportBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    cryptoExportBtn.frame = CGRectMake(btnSpacing, btnY, harBtnW, btnH);
-    [cryptoExportBtn setTitle:@"Export Crypto" forState:UIControlStateNormal];
-    [cryptoExportBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    cryptoExportBtn.titleLabel.font = [UIFont systemFontOfSize:10];
-    cryptoExportBtn.backgroundColor = [UIColor colorWithRed:0.15 green:0.55 blue:0.45 alpha:0.85];
-    cryptoExportBtn.layer.cornerRadius = 6;
-    [cryptoExportBtn addTarget:self action:@selector(exportCrypto) forControlEvents:UIControlEventTouchUpInside];
-    cryptoExportBtn.tag = 889;
-    cryptoExportBtn.hidden = YES;
-    [self.footerView addSubview:cryptoExportBtn];
-
-    UIButton *cryptoClearBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    cryptoClearBtn.frame = CGRectMake(btnSpacing * 2 + harBtnW, btnY, harBtnW, btnH);
-    [cryptoClearBtn setTitle:@"Clear Crypto" forState:UIControlStateNormal];
-    [cryptoClearBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    cryptoClearBtn.titleLabel.font = [UIFont systemFontOfSize:10];
-    cryptoClearBtn.backgroundColor = [UIColor colorWithRed:0.55 green:0.18 blue:0.18 alpha:0.85];
-    cryptoClearBtn.layer.cornerRadius = 6;
-    [cryptoClearBtn addTarget:self action:@selector(clearCrypto) forControlEvents:UIControlEventTouchUpInside];
-    cryptoClearBtn.tag = 890;
-    cryptoClearBtn.hidden = YES;
-    [self.footerView addSubview:cryptoClearBtn];
 
     // 手势
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc]
@@ -912,7 +833,6 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
             self.containerView.frame = CGRectMake(0, 0, currentW, targetH);
             self.fieldsScrollView.hidden = self.collapsed ? YES : (self.activeTab != 0);
             self.harScrollView.hidden = self.collapsed ? YES : (self.activeTab != 1);
-            self.cryptoScrollView.hidden = self.collapsed ? YES : (self.activeTab != 2);
             self.tabBarView.hidden = self.collapsed;
             self.footerView.hidden = self.collapsed;
             [self.collapseBtn setTitle:self.collapsed ? @"▼" : @"▲" forState:UIControlStateNormal];
@@ -1006,8 +926,8 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
     fmt.dateFormat = @"HH:mm:ss";
     NSString *timeStr = self.lastUpdate ? [fmt stringFromDate:self.lastUpdate] : @"--:--:--";
 
-    self.statusLabel.text = [NSString stringWithFormat:@"Count: %ld | HAR: %ld | Crypto: %ld | %@",
-                              (long)self.captureCount, (long)self.harEntries.count, (long)self.cryptoRecords.count, timeStr];
+    self.statusLabel.text = [NSString stringWithFormat:@"Count: %ld | HAR: %ld | %@",
+                              (long)self.captureCount, (long)self.harEntries.count, timeStr];
 
     // 截断 API 名称
     NSString *apiDisplay = self.lastAPI ?: @"-";
@@ -1337,12 +1257,10 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
     self.lastUpdate = nil;
     [self.pendingRequests removeAllObjects];
     [self.harEntries removeAllObjects];
-    [self.cryptoRecords removeAllObjects];
     self.urlLabel.text = @"URL: -";
     self.cookieLabel.text = @"Cookie: -";
     [self updateStatusBar];
     [self refreshHarList];
-    [self refreshCryptoList];
     [self showToast:@"Cleared!"];
 }
 
@@ -1354,10 +1272,6 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
     [self switchTab:1];
 }
 
-- (void)tabCryptoTapped {
-    [self switchTab:2];
-}
-
 - (void)switchTab:(NSInteger)tabIndex {
     dispatch_async(dispatch_get_main_queue(), ^{
         self.activeTab = tabIndex;
@@ -1367,18 +1281,15 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
         // ScrollView visibility
         self.fieldsScrollView.hidden = (tabIndex != 0);
         self.harScrollView.hidden = (tabIndex != 1);
-        self.cryptoScrollView.hidden = (tabIndex != 2);
 
         // Tab button colors
         [self.tabFieldsBtn setTitleColor:(tabIndex == 0 ? activeColor : inactiveColor) forState:UIControlStateNormal];
         [self.tabHarBtn setTitleColor:(tabIndex == 1 ? activeColor : inactiveColor) forState:UIControlStateNormal];
-        [self.tabCryptoBtn setTitleColor:(tabIndex == 2 ? activeColor : inactiveColor) forState:UIControlStateNormal];
 
         // Tab indicators
         [UIView animateWithDuration:0.2 animations:^{
             self.tabFieldsIndicator.alpha = (tabIndex == 0 ? 1.0 : 0.0);
             self.tabHarIndicator.alpha = (tabIndex == 1 ? 1.0 : 0.0);
-            self.tabCryptoIndicator.alpha = (tabIndex == 2 ? 1.0 : 0.0);
         }];
 
         // Footer buttons
@@ -1390,17 +1301,10 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
         self.harExportBtn.hidden = (tabIndex != 1);
         UIView *harClear = [self.footerView viewWithTag:888];
         harClear.hidden = (tabIndex != 1);
-        // Crypto footer
-        UIView *cryptoExport = [self.footerView viewWithTag:889];
-        cryptoExport.hidden = (tabIndex != 2);
-        UIView *cryptoClear = [self.footerView viewWithTag:890];
-        cryptoClear.hidden = (tabIndex != 2);
 
         // Refresh content
         if (tabIndex == 1) {
             [self refreshHarList];
-        } else if (tabIndex == 2) {
-            [self refreshCryptoList];
         }
     });
 }
@@ -1991,260 +1895,6 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
     });
 }
 
-#pragma mark - Crypto Tab
-
-- (void)recordCryptoOperation:(NSString *)algorithm type:(NSString *)type input:(NSString *)input output:(NSString *)output key:(NSString *)key iv:(NSString *)iv {
-    if (!algorithm || algorithm.length == 0) return;
-    // 截断超长字符串
-    if (input.length > 2048) input = [NSString stringWithFormat:@"%@...", [input substringToIndex:2048]];
-    if (output.length > 2048) output = [NSString stringWithFormat:@"%@...", [output substringToIndex:2048]];
-    if (key.length > 256) key = [NSString stringWithFormat:@"%@...", [key substringToIndex:256]];
-    if (iv.length > 256) iv = [NSString stringWithFormat:@"%@...", [iv substringToIndex:256]];
-    
-    void (^recordBlock)(void) = ^{
-        @try {
-            // 记录上限 500 条，超出删除最旧的
-            if (self.cryptoRecords.count >= 500) {
-                [self.cryptoRecords removeObjectAtIndex:0];
-            }
-            NSMutableDictionary *rec = [NSMutableDictionary dictionary];
-            rec[@"algorithm"] = algorithm;
-            rec[@"type"] = type ?: @"unknown";
-            rec[@"input"] = input ?: @"";
-            rec[@"output"] = output ?: @"";
-            rec[@"key"] = key ?: @"";
-            rec[@"iv"] = iv ?: @"";
-            // 时间戳
-            NSDateFormatter *isoFmt = [[NSDateFormatter alloc] init];
-            isoFmt.dateFormat = @"yyyy-MM-dd'T'HH:mm:ss.SSS'Z'";
-            isoFmt.timeZone = [NSTimeZone timeZoneWithAbbreviation:@"UTC"];
-            isoFmt.locale = [[NSLocale alloc] initWithLocaleIdentifier:@"en_US_POSIX"];
-            rec[@"timestamp"] = [isoFmt stringFromDate:[NSDate date]];
-            [self.cryptoRecords addObject:rec];
-            // 仅在 Crypto tab 活跃时刷新 UI，且节流（每5条或前10条刷新一次）
-            if (self.activeTab == 2 && (self.cryptoRecords.count % 5 == 0 || self.cryptoRecords.count < 10)) {
-                [self refreshCryptoList];
-            }
-        } @catch (NSException *e) {}
-    };
-    
-    if ([NSThread isMainThread]) {
-        recordBlock();
-    } else {
-        dispatch_async(dispatch_get_main_queue(), recordBlock);
-    }
-}
-
-- (void)refreshCryptoList {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        // 清除旧内容（保留 tag=998 空状态标签）
-        NSMutableArray *toRemove = [NSMutableArray array];
-        for (UIView *sub in self.cryptoScrollView.subviews) {
-            if (sub.tag != 998) {
-                [toRemove addObject:sub];
-            }
-        }
-        for (UIView *sub in toRemove) {
-            [sub removeFromSuperview];
-        }
-
-        // 空状态标签
-        UILabel *emptyLabel = (UILabel *)[self.cryptoScrollView viewWithTag:998];
-        if (emptyLabel) {
-            emptyLabel.hidden = (self.cryptoRecords.count > 0);
-        }
-
-        CGFloat cy = 8;
-        CGFloat sidePad = 10;
-        CGFloat cardW = self.cryptoScrollView.bounds.size.width - sidePad * 2;
-        CGFloat cardH = 76;
-        CGFloat cardSpacing = 6;
-
-        for (NSInteger i = (NSInteger)self.cryptoRecords.count - 1; i >= 0; i--) {
-            NSDictionary *rec = self.cryptoRecords[i];
-            NSString *algo = rec[@"algorithm"] ?: @"?";
-            NSString *type = rec[@"type"] ?: @"?";
-            NSString *inputStr = rec[@"input"] ?: @"";
-            NSString *outputStr = rec[@"output"] ?: @"";
-            NSString *keyStr = rec[@"key"] ?: @"";
-            NSString *ivStr = rec[@"iv"] ?: @"";
-            NSString *ts = rec[@"timestamp"] ?: @"";
-
-            // 根据类型决定颜色
-            UIColor *typeColor;
-            if ([type containsString:@"hash"] || [type containsString:@"Hash"]) {
-                typeColor = [UIColor colorWithRed:0.75 green:0.55 blue:0.20 alpha:1.0]; // 橙色
-            } else if ([type containsString:@"hmac"] || [type containsString:@"HMAC"]) {
-                typeColor = [UIColor colorWithRed:0.85 green:0.45 blue:0.65 alpha:1.0]; // 粉色
-            } else if ([type containsString:@"encrypt"] || [type containsString:@"Encrypt"]) {
-                typeColor = [UIColor colorWithRed:0.20 green:0.65 blue:0.85 alpha:1.0]; // 青色
-            } else if ([type containsString:@"decrypt"] || [type containsString:@"Decrypt"]) {
-                typeColor = [UIColor colorWithRed:0.30 green:0.75 blue:0.40 alpha:1.0]; // 绿色
-            } else {
-                typeColor = [UIColor colorWithRed:0.55 green:0.55 blue:0.60 alpha:1.0];
-            }
-
-            UIView *card = [[UIView alloc] initWithFrame:CGRectMake(sidePad, cy, cardW, cardH)];
-            card.backgroundColor = [UIColor colorWithRed:0.10 green:0.10 blue:0.13 alpha:0.85];
-            card.layer.cornerRadius = 8;
-            card.layer.masksToBounds = YES;
-            card.tag = 2000 + (int)i;
-
-            // 算法名 + 类型
-            UILabel *algoLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 4, cardW - 20, 16)];
-            algoLabel.text = [NSString stringWithFormat:@"%@  [%@]", algo, type];
-            algoLabel.textColor = typeColor;
-            algoLabel.font = [UIFont boldSystemFontOfSize:11];
-            [card addSubview:algoLabel];
-
-            // 时间戳
-            UILabel *tsLabel = [[UILabel alloc] initWithFrame:CGRectMake(cardW - 130, 4, 120, 14)];
-            NSString *shortTs = ts;
-            if (shortTs.length > 20) shortTs = [shortTs substringFromIndex:shortTs.length - 13];
-            tsLabel.text = shortTs;
-            tsLabel.textColor = [UIColor colorWithRed:0.40 green:0.40 blue:0.45 alpha:1.0];
-            tsLabel.font = [UIFont systemFontOfSize:8];
-            tsLabel.textAlignment = NSTextAlignmentRight;
-            [card addSubview:tsLabel];
-
-            // Input
-            UILabel *inLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 22, cardW - 20, 16)];
-            NSString *inDisp = inputStr;
-            if (inDisp.length > 50) inDisp = [NSString stringWithFormat:@"%@...", [inDisp substringToIndex:50]];
-            inLabel.text = [NSString stringWithFormat:@"In: %@", inDisp];
-            inLabel.textColor = [UIColor colorWithRed:0.60 green:0.65 blue:0.75 alpha:1.0];
-            inLabel.font = [UIFont fontWithName:@"Menlo" size:8];
-            inLabel.adjustsFontSizeToFitWidth = YES;
-            inLabel.minimumScaleFactor = 0.4;
-            [card addSubview:inLabel];
-
-            // Output
-            UILabel *outLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 38, cardW - 20, 16)];
-            NSString *outDisp = outputStr;
-            if (outDisp.length > 50) outDisp = [NSString stringWithFormat:@"%@...", [outDisp substringToIndex:50]];
-            outLabel.text = [NSString stringWithFormat:@"Out: %@", outDisp];
-            outLabel.textColor = [UIColor colorWithRed:0.65 green:0.80 blue:0.55 alpha:1.0];
-            outLabel.font = [UIFont fontWithName:@"Menlo" size:8];
-            outLabel.adjustsFontSizeToFitWidth = YES;
-            outLabel.minimumScaleFactor = 0.4;
-            [card addSubview:outLabel];
-
-            // Key/IV
-            NSString *keyInfo = @"";
-            if (keyStr.length > 0) {
-                keyInfo = [NSString stringWithFormat:@"Key: %@", keyStr.length > 30 ? [NSString stringWithFormat:@"%@...", [keyStr substringToIndex:30]] : keyStr];
-            }
-            if (ivStr.length > 0) {
-                if (keyInfo.length > 0) keyInfo = [keyInfo stringByAppendingString:@"  "];
-                keyInfo = [keyInfo stringByAppendingFormat:@"IV: %@", ivStr.length > 30 ? [NSString stringWithFormat:@"%@...", [ivStr substringToIndex:30]] : ivStr];
-            }
-            if (keyInfo.length > 0) {
-                UILabel *keyLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 54, cardW - 20, 16)];
-                keyLabel.text = keyInfo;
-                keyLabel.textColor = [UIColor colorWithRed:0.90 green:0.70 blue:0.30 alpha:1.0];
-                keyLabel.font = [UIFont fontWithName:@"Menlo" size:8];
-                keyLabel.adjustsFontSizeToFitWidth = YES;
-                keyLabel.minimumScaleFactor = 0.4;
-                [card addSubview:keyLabel];
-            }
-
-            // 长按复制
-            UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc]
-                initWithTarget:self action:@selector(handleCryptoLongPress:)];
-            lp.minimumPressDuration = 0.5;
-            [card addGestureRecognizer:lp];
-
-            [self.cryptoScrollView addSubview:card];
-            cy += cardH + cardSpacing;
-        }
-
-        self.cryptoScrollView.contentSize = CGSizeMake(self.cryptoScrollView.bounds.size.width, cy + 8);
-    });
-}
-
-- (void)handleCryptoLongPress:(UILongPressGestureRecognizer *)gesture {
-    if (gesture.state != UIGestureRecognizerStateBegan) return;
-    UIView *card = gesture.view;
-    NSInteger tag = card.tag;
-    if (tag < 2000) return;
-    NSInteger idx = tag - 2000;
-    // 倒序映射: UI 是倒序显示的
-    NSInteger actualIdx = (NSInteger)self.cryptoRecords.count - 1 - idx;
-    if (actualIdx < 0 || actualIdx >= (NSInteger)self.cryptoRecords.count) return;
-    NSDictionary *rec = self.cryptoRecords[actualIdx];
-    NSString *output = rec[@"output"] ?: @"";
-    if (output.length > 0) {
-        UIPasteboard.generalPasteboard.string = output;
-        [self showToast:@"Output copied!"];
-    }
-}
-
-- (void)clearCrypto {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [self.cryptoRecords removeAllObjects];
-        [self updateStatusBar];
-        [self refreshCryptoList];
-        [self showToast:@"Crypto cleared!"];
-    });
-}
-
-- (void)exportCrypto {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (self.cryptoRecords.count == 0) {
-            [self showToast:@"No crypto records to export!"];
-            return;
-        }
-
-        NSMutableArray *exportRecords = [NSMutableArray array];
-        for (NSDictionary *rec in self.cryptoRecords) {
-            NSMutableDictionary *exportRec = [NSMutableDictionary dictionary];
-            exportRec[@"algorithm"] = rec[@"algorithm"] ?: @"";
-            exportRec[@"type"] = rec[@"type"] ?: @"";
-            exportRec[@"input"] = rec[@"input"] ?: @"";
-            exportRec[@"output"] = rec[@"output"] ?: @"";
-            exportRec[@"key"] = rec[@"key"] ?: @"";
-            exportRec[@"iv"] = rec[@"iv"] ?: @"";
-            exportRec[@"timestamp"] = rec[@"timestamp"] ?: @"";
-            [exportRecords addObject:exportRec];
-        }
-
-        NSDateFormatter *exportFmt = [[NSDateFormatter alloc] init];
-        exportFmt.dateFormat = @"yyyy-MM-dd'T'HH:mm:ss.SSS'Z'";
-        exportFmt.timeZone = [NSTimeZone timeZoneWithAbbreviation:@"UTC"];
-        exportFmt.locale = [[NSLocale alloc] initWithLocaleIdentifier:@"en_US_POSIX"];
-
-        NSDictionary *exportData = @{
-            @"exportTime": [exportFmt stringFromDate:[NSDate date]],
-            @"totalRecords": @(exportRecords.count),
-            @"records": exportRecords
-        };
-
-        NSData *jsonData = [NSJSONSerialization dataWithJSONObject:exportData options:NSJSONWritingPrettyPrinted error:nil];
-        if (!jsonData) {
-            [self showToast:@"Failed to generate JSON!"];
-            return;
-        }
-
-        NSDateFormatter *fileFmt = [[NSDateFormatter alloc] init];
-        fileFmt.dateFormat = @"yyyyMMdd_HHmmss";
-        fileFmt.locale = [[NSLocale alloc] initWithLocaleIdentifier:@"en_US_POSIX"];
-        NSString *fileName = [NSString stringWithFormat:@"crypto_%@.json", [fileFmt stringFromDate:[NSDate date]]];
-        NSString *tmpPath = [NSTemporaryDirectory() stringByAppendingPathComponent:fileName];
-        [jsonData writeToFile:tmpPath atomically:YES];
-        NSURL *fileURL = [NSURL fileURLWithPath:tmpPath];
-
-        UIActivityViewController *avc = [[UIActivityViewController alloc] initWithActivityItems:@[fileURL] applicationActivities:nil];
-        // iPad support
-        if (avc.popoverPresentationController) {
-            avc.popoverPresentationController.sourceView = self.containerView;
-            avc.popoverPresentationController.sourceRect = CGRectMake(self.containerView.bounds.size.width / 2, self.containerView.bounds.size.height / 2, 1, 1);
-            avc.popoverPresentationController.permittedArrowDirections = 0;
-        }
-        [self.window.rootViewController presentViewController:avc animated:YES completion:nil];
-        NSLog(@"[ElemeFieldMonitor] Crypto export: %lu records -> %@", (unsigned long)exportRecords.count, fileName);
-    });
-}
-
 - (void)showToast:(NSString *)msg {
     UILabel *toast = [[UILabel alloc] init];
     toast.text = msg;
@@ -2759,169 +2409,17 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
 %end
 
 // ============================================================================
-// MARK: - Crypto Hooks (哈希/HMAC/加解密) - 逐步启用排查闪退
-// ============================================================================
-#if 1  // CRYPTO_HOOKS_ENABLED
-
-// 用 MSHookFunction 替代 %hookf，更底层更可靠
-static unsigned char *(*orig_CC_SHA256)(const void *data, CC_LONG len, unsigned char *md) = NULL;
-
-static unsigned char *hook_CC_SHA256(const void *data, CC_LONG len, unsigned char *md) {
-    unsigned char *result = orig_CC_SHA256(data, len, md);
-    // 暂时不做任何记录，只验证 MSHookFunction 是否可行
-    return result;
-}
-
-// --- Hook: CCHmac (暂时禁用排查闪退) ---
-#if 0  // HMAC_DISABLED
-// 用静态字典存储 ctx 指针对应的算法名和密钥 (CCHmacContext 是 C 结构体，不能用 objc_setAssociatedObject)
-static NSMutableDictionary *g_hmacContexts = nil;
-
-%hookf(void, CCHmacInit, CCHmacContext *ctx, CCHmacAlgorithm algorithm, const void *key, size_t keyLength) {
-    %orig;
-    if (g_cryptoReady && ctx) {
-        @try {
-            NSString *algoName = @"UnknownHMAC";
-            switch (algorithm) {
-                case kCCHmacAlgMD5:    algoName = @"HMAC-MD5"; break;
-                case kCCHmacAlgSHA1:   algoName = @"HMAC-SHA1"; break;
-                case kCCHmacAlgSHA256: algoName = @"HMAC-SHA256"; break;
-                case kCCHmacAlgSHA384: algoName = @"HMAC-SHA384"; break;
-                case kCCHmacAlgSHA512: algoName = @"HMAC-SHA512"; break;
-                case kCCHmacAlgSHA224: algoName = @"HMAC-SHA224"; break;
-            }
-            NSString *keyStr = @"";
-            if (key && keyLength > 0) {
-                NSData *keyData = [NSData dataWithBytes:key length:keyLength];
-                keyStr = dataToString(keyData);
-            }
-            if (!g_hmacContexts) g_hmacContexts = [NSMutableDictionary dictionary];
-            NSString *ctxKey = [NSString stringWithFormat:@"%p", ctx];
-            @synchronized(g_hmacContexts) {
-                g_hmacContexts[ctxKey] = @{@"algo": algoName, @"key": keyStr};
-            }
-        } @catch (NSException *e) {}
-    }
-}
-
-%hookf(void, CCHmacFinal, CCHmacContext *ctx, void *macOut) {
-    %orig;
-    if (g_cryptoReady && ctx && macOut) {
-        @try {
-            NSString *ctxKey = [NSString stringWithFormat:@"%p", ctx];
-            NSDictionary *ctxInfo = nil;
-            @synchronized(g_hmacContexts) {
-                ctxInfo = g_hmacContexts[ctxKey];
-                [g_hmacContexts removeObjectForKey:ctxKey];
-            }
-            if (ctxInfo) {
-                NSString *algoName = ctxInfo[@"algo"];
-                NSString *keyStr = ctxInfo[@"key"];
-                // 根据算法确定输出长度
-                size_t macLen = 0;
-                if ([algoName containsString:@"MD5"]) macLen = CC_MD5_DIGEST_LENGTH;
-                else if ([algoName containsString:@"SHA1"]) macLen = CC_SHA1_DIGEST_LENGTH;
-                else if ([algoName containsString:@"SHA256"]) macLen = CC_SHA256_DIGEST_LENGTH;
-                else if ([algoName containsString:@"SHA384"]) macLen = 48;
-                else if ([algoName containsString:@"SHA512"]) macLen = CC_SHA512_DIGEST_LENGTH;
-                else if ([algoName containsString:@"SHA224"]) macLen = CC_SHA224_DIGEST_LENGTH;
-                if (macLen > 0) {
-                    NSData *outputData = [NSData dataWithBytes:macOut length:macLen];
-                    NSString *outputStr = dataToHex(outputData);
-                    [[FloatWindowManager sharedInstance] recordCryptoOperation:algoName
-                                                                           type:@"hmac"
-                                                                          input:@"(streamed)"
-                                                                         output:outputStr
-                                                                            key:keyStr ?: @""
-                                                                            iv:@""];
-                }
-            }
-        } @catch (NSException *e) {}
-    }
-}
-#endif  // HMAC_DISABLED
-
-// --- Hook: CCCrypt (AES/DES/3DES/RC4/RC2/Blowfish) (暂时禁用排查闪退) ---
-#if 0  // CCCRYPT_DISABLED
-%hookf(CCCryptorStatus, CCCrypt, CCOperation op, CCAlgorithm alg, CCOptions options, const void *key, size_t keyLength, const void *iv, size_t ivLength, const void *dataIn, size_t dataInLength, void *dataOut, size_t dataOutAvailable, size_t *dataOutMoved) {
-    CCCryptorStatus status = %orig;
-    if (g_cryptoReady && status == kCCSuccess) {
-        @try {
-            // 算法名
-            NSString *algoName = @"Unknown";
-            switch (alg) {
-                case kCCAlgorithmAES: algoName = @"AES"; break;
-                case kCCAlgorithmDES: algoName = @"DES"; break;
-                case kCCAlgorithm3DES: algoName = @"3DES"; break;
-                case kCCAlgorithmCAST: algoName = @"CAST"; break;
-                case kCCAlgorithmRC4: algoName = @"RC4"; break;
-                case kCCAlgorithmRC2: algoName = @"RC2"; break;
-                case kCCAlgorithmBlowfish: algoName = @"Blowfish"; break;
-            }
-            // 操作类型
-            NSString *typeStr = (op == kCCEncrypt) ? @"encrypt" : @"decrypt";
-            // 输入
-            NSString *inputStr = @"(empty)";
-            if (dataIn && dataInLength > 0) {
-                NSData *inData = [NSData dataWithBytes:dataIn length:dataInLength];
-                inputStr = dataToString(inData);
-            }
-            // 输出
-            NSString *outputStr = @"(empty)";
-            if (dataOut && dataOutMoved && *dataOutMoved > 0) {
-                NSData *outData = [NSData dataWithBytes:dataOut length:*dataOutMoved];
-                outputStr = dataToString(outData);
-            }
-            // 密钥
-            NSString *keyStr = @"";
-            if (key && keyLength > 0) {
-                NSData *keyData = [NSData dataWithBytes:key length:keyLength];
-                keyStr = dataToString(keyData);
-            }
-            // IV
-            NSString *ivStr = @"";
-            if (iv && ivLength > 0) {
-                NSData *ivData = [NSData dataWithBytes:iv length:ivLength];
-                ivStr = dataToString(ivData);
-            }
-            [[FloatWindowManager sharedInstance] recordCryptoOperation:algoName
-                                                                   type:typeStr
-                                                                  input:inputStr
-                                                                 output:outputStr
-                                                                    key:keyStr
-                                                                    iv:ivStr];
-        } @catch (NSException *e) {}
-    }
-    return status;
-}
-#endif  // CCCRYPT_DISABLED
-
-#endif  // CRYPTO_HOOKS_ENABLED
-
-// ============================================================================
 // MARK: - 构造函数
 // ============================================================================
 
 %ctor {
     NSLog(@"[ElemeFieldMonitor] ============================================");
     NSLog(@"[ElemeFieldMonitor] Tweak loaded into me.ele.ios.eleme");
-    NSLog(@"[ElemeFieldMonitor] Monitoring: encryptSceneCode, encryptActCode, rightId, sourceFrom, sceneCode, actCode + Cookie + API Records + Crypto (MD5/SHA/HMAC/AES/DES)");
+    NSLog(@"[ElemeFieldMonitor] Monitoring: encryptSceneCode, encryptActCode, rightId, sourceFrom, sceneCode, actCode + Cookie + API Records");
     NSLog(@"[ElemeFieldMonitor] ============================================");
 
     // 初始化悬浮窗管理器 (触发 dispatch_once 创建实例)
     [FloatWindowManager sharedInstance];
-
-    // 延迟 5 秒后用 dlsym+MSHookFunction hook CC_SHA256
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        void *sym = dlsym(RTLD_DEFAULT, "CC_SHA256");
-        if (sym) {
-            MSHookFunction(sym, (void *)hook_CC_SHA256, (void **)&orig_CC_SHA256);
-            NSLog(@"[ElemeFieldMonitor] CC_SHA256 hooked via dlsym+MSHookFunction at %p", sym);
-        } else {
-            NSLog(@"[ElemeFieldMonitor] CC_SHA256 not found via dlsym!");
-        }
-    });
 
     // 延迟显示悬浮窗，确保 UI 已就绪
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)),
