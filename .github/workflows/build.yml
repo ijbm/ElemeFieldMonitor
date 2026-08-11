@@ -3,9 +3,6 @@ name: Build ElemeFieldMonitor Tweak
 on:
   push:
     branches: [ main, master ]
-    paths:
-      - 'ElemeFieldMonitor/**'
-      - '.github/workflows/build.yml'
   pull_request:
     branches: [ main, master ]
   workflow_dispatch:
@@ -59,18 +56,13 @@ jobs:
 
       - name: 🔨 Prepare project
         run: |
-          # 确保项目目录结构正确
-          cd $GITHUB_WORKSPACE/ElemeFieldMonitor
-
-          # 列出项目文件
+          # 项目文件就在仓库根目录
           echo "=== Project files ==="
           ls -la
 
-          # 检查 Makefile
           echo "=== Makefile ==="
           cat Makefile
 
-          # 检查 Tweak.x
           echo "=== Tweak.x (first 20 lines) ==="
           head -20 Tweak.x
 
@@ -79,8 +71,6 @@ jobs:
           export THEOS=/opt/theos
           export THEOS_PACKAGE_SCHEME=rootless
           export PATH="/opt/theos/bin:$PATH"
-
-          cd $GITHUB_WORKSPACE/ElemeFieldMonitor
 
           # 清理之前的构建
           make clean 2>/dev/null || true
@@ -98,7 +88,6 @@ jobs:
       - name: 📋 List build artifacts
         run: |
           export THEOS=/opt/theos
-          cd $GITHUB_WORKSPACE/ElemeFieldMonitor
 
           echo "=== .theos directory ==="
           find .theos -type f 2>/dev/null || echo "No .theos directory"
@@ -117,8 +106,8 @@ jobs:
         with:
           name: ElemeFieldMonitor-deb
           path: |
-            ElemeFieldMonitor/packages/*.deb
-            ElemeFieldMonitor/.theos/packages/*.deb
+            packages/*.deb
+            .theos/packages/*.deb
           if-no-files-found: warn
           retention-days: 30
 
@@ -127,8 +116,8 @@ jobs:
         with:
           name: ElemeFieldMonitor-dylib
           path: |
-            ElemeFieldMonitor/.theos/obj/*.dylib
-            ElemeFieldMonitor/.theos/obj/arm64/*.dylib
+            .theos/obj/*.dylib
+            .theos/obj/arm64/*.dylib
           if-no-files-found: warn
           retention-days: 30
 
@@ -138,6 +127,6 @@ jobs:
         with:
           name: build-logs
           path: |
-            ElemeFieldMonitor/.theos/
+            .theos/
           if-no-files-found: warn
           retention-days: 7
