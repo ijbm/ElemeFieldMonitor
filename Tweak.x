@@ -2910,9 +2910,17 @@ static NSMutableDictionary *g_hmacContexts = nil;
     // 初始化悬浮窗管理器 (触发 dispatch_once 创建实例)
     [FloatWindowManager sharedInstance];
 
-    // 用 MSHookFunction hook CC_SHA256
-    MSHookFunction((void *)CC_SHA256, (void *)hook_CC_SHA256, (void **)&orig_CC_SHA256);
-    NSLog(@"[ElemeFieldMonitor] CC_SHA256 hooked via MSHookFunction");
+    // 延迟 5 秒后用 dlsym+MSHookFunction hook CC_SHA256
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        void *sym = dlsym(RTLD_DEFAULT, "CC_SHA256");
+        if (sym) {
+            MSHookFunction(sym, (void *)hook_CC_SHA256, (void **)&orig_CC_SHA256);
+            NSLog(@"[ElemeFieldMonitor] CC_SHA256 hooked via dlsym+MSHookFunction at %p", sym);
+        } else {
+            NSLog(@"[ElemeFieldMonitor] CC_SHA256 not found via dlsym!");
+        }
+    });
 
     // 延迟显示悬浮窗，确保 UI 已就绪
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)),
