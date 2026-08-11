@@ -137,9 +137,11 @@ static NSArray *kTargetKeys(void) {
 @property (nonatomic, strong) UIButton *exportBtn;
 @property (nonatomic, strong) UIButton *clearButton;
 @property (nonatomic, strong) UIButton *collapseBtn;
+@property (nonatomic, strong) UIButton *historyBtn;
 @property (nonatomic, strong) UILabel *urlLabel;
 @property (nonatomic, strong) NSString *lastURL;
 @property (nonatomic, assign) BOOL collapsed;
+@property (nonatomic, strong) NSMutableArray *historyRecords;
 
 + (instancetype)sharedInstance;
 - (void)show;
@@ -149,6 +151,8 @@ static NSArray *kTargetKeys(void) {
 - (void)updateWithDictionary:(NSDictionary *)dict source:(NSString *)source api:(NSString *)api;
 - (void)updateURL:(NSString *)url;
 - (void)copyAllToClipboard;
+- (void)exportHistory;
+- (void)saveHistorySnapshot:(NSString *)source api:(NSString *)api;
 
 @end
 
@@ -173,6 +177,7 @@ static NSArray *kTargetKeys(void) {
         _lastSource = @"-";
         _lastAPI = @"-";
         _lastURL = @"-";
+        _historyRecords = [NSMutableArray array];
         // 延迟创建窗口，确保 UIApplication 已就绪
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
@@ -352,23 +357,34 @@ static NSArray *kTargetKeys(void) {
     self.footerView.backgroundColor = [UIColor colorWithRed:0.12 green:0.12 blue:0.16 alpha:1.0];
     [self.containerView addSubview:self.footerView];
 
-    // Copy All button
+    // Copy All button (current snapshot)
     self.exportBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    self.exportBtn.frame = CGRectMake(12, 6, 140, 28);
-    [self.exportBtn setTitle:@"📋 Copy All JSON" forState:UIControlStateNormal];
+    self.exportBtn.frame = CGRectMake(8, 6, 100, 28);
+    [self.exportBtn setTitle:@"📋 Copy" forState:UIControlStateNormal];
     [self.exportBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    self.exportBtn.titleLabel.font = [UIFont systemFontOfSize:12];
+    self.exportBtn.titleLabel.font = [UIFont systemFontOfSize:11];
     self.exportBtn.backgroundColor = [UIColor colorWithRed:0.15 green:0.4 blue:0.8 alpha:0.8];
     self.exportBtn.layer.cornerRadius = 6;
     [self.exportBtn addTarget:self action:@selector(copyAllToClipboard) forControlEvents:UIControlEventTouchUpInside];
     [self.footerView addSubview:self.exportBtn];
+
+    // Export History button
+    self.historyBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    self.historyBtn.frame = CGRectMake(114, 6, 100, 28);
+    [self.historyBtn setTitle:@"📤 Export" forState:UIControlStateNormal];
+    [self.historyBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    self.historyBtn.titleLabel.font = [UIFont systemFontOfSize:11];
+    self.historyBtn.backgroundColor = [UIColor colorWithRed:0.2 green:0.55 blue:0.3 alpha:0.8];
+    self.historyBtn.layer.cornerRadius = 6;
+    [self.historyBtn addTarget:self action:@selector(exportHistory) forControlEvents:UIControlEventTouchUpInside];
+    [self.footerView addSubview:self.historyBtn];
 
     // Clear button
     self.clearButton = [UIButton buttonWithType:UIButtonTypeSystem];
     self.clearButton.frame = CGRectMake(windowW - 92, 6, 80, 28);
     [self.clearButton setTitle:@"🗑 Clear" forState:UIControlStateNormal];
     [self.clearButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    self.clearButton.titleLabel.font = [UIFont systemFontOfSize:12];
+    self.clearButton.titleLabel.font = [UIFont systemFontOfSize:11];
     self.clearButton.backgroundColor = [UIColor colorWithRed:0.6 green:0.2 blue:0.2 alpha:0.8];
     self.clearButton.layer.cornerRadius = 6;
     [self.clearButton addTarget:self action:@selector(clearAll) forControlEvents:UIControlEventTouchUpInside];
@@ -391,15 +407,17 @@ static NSArray *kTargetKeys(void) {
 #pragma mark - 手势处理
 
 - (void)handlePan:(UIPanGestureRecognizer *)gesture {
-    CGPoint translation = [gesture translationInView:self.window];
-    CGPoint newCenter = CGPointMake(gesture.view.center.x + translation.x,
-                                     gesture.view.center.y + translation.y);
+    CGPoint translation = [gesture translationInView:self.window.superview ?: self.window];
+    CGPoint newCenter = CGPointMake(self.window.center.x + translation.x,
+                                     self.window.center.y + translation.y);
     // 限制在屏幕范围内
-    CGFloat halfW = self.containerView.bounds.size.width / 2;
-    CGFloat halfH = self.containerView.bounds.size.height / 2;
-    newCenter.x = MAX(halfW, MIN(self.window.bounds.size.width - halfW, newCenter.x));
-    newCenter.y = MAX(halfH, MIN([UIScreen mainScreen].bounds.size.height - halfH, newCenter.y));
-    gesture.view.center = newCenter;
+    CGFloat halfW = self.window.bounds.size.width / 2;
+    CGFloat halfH = self.window.bounds.size.height / 2;
+    CGFloat screenW = [UIScreen mainScreen].bounds.size.width;
+    CGFloat screenH = [UIScreen mainScreen].bounds.size.height;
+    newCenter.x = MAX(halfW, MIN(screenW - halfW, newCenter.x));
+    newCenter.y = MAX(halfH, MIN(screenH - halfH, newCenter.y));
+    self.window.center = newCenter;
     [gesture setTranslation:CGPointZero inView:self.window];
 }
 
@@ -528,9 +546,30 @@ static NSArray *kTargetKeys(void) {
             self.lastUpdate = [NSDate date];
             if (api) self.lastAPI = api;
             if (source) self.lastSource = source;
+            [self saveHistorySnapshot:source api:api];
             [self updateStatusBar];
         }
     });
+}
+
+- (void)saveHistorySnapshot:(NSString *)source api:(NSString *)api {
+    NSMutableDictionary *snapshot = [NSMutableDictionary dictionary];
+    for (NSString *key in kTargetKeys()) {
+        NSString *value = self.fieldValues[key];
+        if (value) {
+            snapshot[key] = value;
+        }
+    }
+    snapshot[@"_source"] = source ?: @"-";
+    snapshot[@"_api"] = api ?: self.lastAPI ?: @"-";
+    snapshot[@"_url"] = self.lastURL ?: @"-";
+    snapshot[@"_timestamp"] = [self.lastUpdate description] ?: @"-";
+    snapshot[@"_index"] = @(self.historyRecords.count + 1);
+    [self.historyRecords addObject:snapshot];
+    // 限制历史记录最多 500 条，防止内存溢出
+    if (self.historyRecords.count > 500) {
+        [self.historyRecords removeObjectAtIndex:0];
+    }
 }
 
 - (void)updateStatusBar {
@@ -538,8 +577,8 @@ static NSArray *kTargetKeys(void) {
     fmt.dateFormat = @"HH:mm:ss";
     NSString *timeStr = self.lastUpdate ? [fmt stringFromDate:self.lastUpdate] : @"--:--:--";
 
-    self.statusLabel.text = [NSString stringWithFormat:@"Count: %ld | Source: %@ | %@",
-                              (long)self.captureCount, self.lastSource, timeStr];
+    self.statusLabel.text = [NSString stringWithFormat:@"Count: %ld | Hist: %ld | %@",
+                              (long)self.captureCount, (long)self.historyRecords.count, timeStr];
 
     // 截断 API 名称
     NSString *apiDisplay = self.lastAPI ?: @"-";
@@ -569,7 +608,26 @@ static NSArray *kTargetKeys(void) {
     NSString *jsonStr = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
     UIPasteboard.generalPasteboard.string = jsonStr;
 
-    [self showToast:@"All fields copied!"];
+    [self showToast:@"Current snapshot copied!"];
+}
+
+- (void)exportHistory {
+    if (self.historyRecords.count == 0) {
+        [self showToast:@"No history to export!"];
+        return;
+    }
+    NSDictionary *export = @{
+        @"app": @"ElemeFieldMonitor",
+        @"exportTime": [[NSDate date] description],
+        @"totalRecords": @(self.historyRecords.count),
+        @"fields": kTargetKeys(),
+        @"records": self.historyRecords
+    };
+    NSData *data = [NSJSONSerialization dataWithJSONObject:export options:NSJSONWritingPrettyPrinted error:nil];
+    NSString *jsonStr = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    UIPasteboard.generalPasteboard.string = jsonStr;
+
+    [self showToast:[NSString stringWithFormat:@"Exported %ld records!", (long)self.historyRecords.count]];
 }
 
 - (void)clearAll {
@@ -587,6 +645,7 @@ static NSArray *kTargetKeys(void) {
     self.lastSource = @"-";
     self.lastURL = @"-";
     self.lastUpdate = nil;
+    [self.historyRecords removeAllObjects];
     self.urlLabel.text = @"URL: -";
     [self updateStatusBar];
     [self showToast:@"Cleared!"];
