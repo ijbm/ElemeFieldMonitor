@@ -1,0 +1,9 @@
+Package: com.eleme.fieldmonitor
+Name: ElemeFieldMonitor
+Version: 1.0.0
+Architecture: iphoneos-arm
+Description: Floating window monitor for Eleme encryptSceneCode/encryptActCode/rightId/sourceFrom/sceneCode/actCode
+Maintainer: Cascade AI
+Author: Cascade AI
+Section: Tweaks
+Depends: mobilesubstrate

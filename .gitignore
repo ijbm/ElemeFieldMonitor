@@ -1,0 +1,12 @@
+# Build artifacts
+.theos/
+packages/
+*.deb
+*.dylib
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/

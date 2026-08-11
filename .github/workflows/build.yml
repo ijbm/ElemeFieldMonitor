@@ -1,0 +1,143 @@
+name: Build ElemeFieldMonitor Tweak
+
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'ElemeFieldMonitor/**'
+      - '.github/workflows/build.yml'
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build Tweak (Theos)
+    runs-on: macos-14
+
+    steps:
+      - name: 📦 Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: 🍺 Install dependencies
+        run: |
+          brew install ldid make perl rsync
+          # 安装 dpkg (用于打包 .deb)
+          brew install dpkg
+
+      - name: 🔧 Setup Theos
+        run: |
+          # 克隆 Theos 到 /opt/theos
+          sudo mkdir -p /opt/theos
+          sudo chown -R $(whoami) /opt/theos
+          git clone --recursive https://github.com/theos/theos.git /opt/theos
+
+          # 设置环境变量
+          echo "THEOS=/opt/theos" >> "$GITHUB_ENV"
+          echo "THEOS_PACKAGE_SCHEME=rootless" >> "$GITHUB_ENV"
+
+          # 将环境变量写入 .bashrc 供后续步骤使用
+          echo 'export THEOS=/opt/theos' >> ~/.bashrc
+          echo 'export THEOS_PACKAGE_SCHEME=rootless' >> ~/.bashrc
+
+      - name: 📱 Setup iOS SDK
+        run: |
+          # Theos 需要 iOS SDK，尝试从 Theos 的 sdks 仓库获取
+          cd /opt/theos
+          git clone --recursive https://github.com/theos/sdks.git sdks 2>/dev/null || true
+
+          # 检查可用的 SDK
+          ls -la /opt/theos/sdks/ || true
+
+          # 如果没有 SDK，尝试下载 iPhoneOS SDK
+          if [ ! -d "/opt/theos/sdks/iPhoneOS15.0.sdk" ]; then
+            echo "⚠️ iPhoneOS15.0.sdk not found, checking alternatives..."
+            ls /opt/theos/sdks/ 2>/dev/null || echo "No sdks directory"
+          fi
+
+      - name: 🔨 Prepare project
+        run: |
+          # 确保项目目录结构正确
+          cd $GITHUB_WORKSPACE/ElemeFieldMonitor
+
+          # 列出项目文件
+          echo "=== Project files ==="
+          ls -la
+
+          # 检查 Makefile
+          echo "=== Makefile ==="
+          cat Makefile
+
+          # 检查 Tweak.x
+          echo "=== Tweak.x (first 20 lines) ==="
+          head -20 Tweak.x
+
+      - name: 🏗️ Build tweak
+        run: |
+          export THEOS=/opt/theos
+          export THEOS_PACKAGE_SCHEME=rootless
+          export PATH="/opt/theos/bin:$PATH"
+
+          cd $GITHUB_WORKSPACE/ElemeFieldMonitor
+
+          # 清理之前的构建
+          make clean 2>/dev/null || true
+
+          # 构建
+          echo "=== Building ==="
+          make package 2>&1 || {
+            echo "❌ Build failed, trying with debug output..."
+            make package DEBUG=1 2>&1
+            exit 1
+          }
+
+          echo "=== Build successful! ==="
+
+      - name: 📋 List build artifacts
+        run: |
+          export THEOS=/opt/theos
+          cd $GITHUB_WORKSPACE/ElemeFieldMonitor
+
+          echo "=== .theos directory ==="
+          find .theos -type f 2>/dev/null || echo "No .theos directory"
+
+          echo "=== Packages ==="
+          ls -la packages/ 2>/dev/null || echo "No packages directory"
+
+          echo "=== .deb files ==="
+          find . -name "*.deb" -type f 2>/dev/null || echo "No .deb files"
+
+          echo "=== .dylib files ==="
+          find . -name "*.dylib" -type f 2>/dev/null || echo "No .dylib files"
+
+      - name: 📤 Upload .deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ElemeFieldMonitor-deb
+          path: |
+            ElemeFieldMonitor/packages/*.deb
+            ElemeFieldMonitor/.theos/packages/*.deb
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: 📤 Upload .dylib artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ElemeFieldMonitor-dylib
+          path: |
+            ElemeFieldMonitor/.theos/obj/*.dylib
+            ElemeFieldMonitor/.theos/obj/arm64/*.dylib
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: 📤 Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            ElemeFieldMonitor/.theos/
+          if-no-files-found: warn
+          retention-days: 7
