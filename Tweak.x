@@ -15,6 +15,9 @@
 #import <objc/runtime.h>
 #import <CommonCrypto/CommonCrypto.h>
 
+// 安全标志: FloatWindowManager 初始化完成后才记录 crypto 操作
+static volatile BOOL g_cryptoReady = NO;
+
 // ============================================================================
 // MARK: - 目标字段定义
 // ============================================================================
@@ -2752,9 +2755,6 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
 // ============================================================================
 // MARK: - Crypto Hooks (哈希/HMAC/加解密)
 // ============================================================================
-
-// 安全标志: FloatWindowManager 初始化完成后才记录
-static volatile BOOL g_cryptoReady = NO;
 
 // 辅助函数: NSData -> hex 字符串 (限制最大 1024 字节)
 static NSString *dataToHex(NSData *data) {
