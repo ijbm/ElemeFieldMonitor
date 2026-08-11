@@ -13,6 +13,7 @@
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
+#import <CommonCrypto/CommonCrypto.h>
 
 // ============================================================================
 // MARK: - 目标字段定义
@@ -192,10 +193,15 @@ static NSDictionary *g_lastHeaders = nil;
 @property (nonatomic, strong) UIScrollView *harScrollView;
 @property (nonatomic, strong) UIButton *tabFieldsBtn;
 @property (nonatomic, strong) UIButton *tabHarBtn;
+@property (nonatomic, strong) UIButton *tabCryptoBtn;
 @property (nonatomic, strong) UIView *tabFieldsIndicator;
 @property (nonatomic, strong) UIView *tabHarIndicator;
-@property (nonatomic, assign) NSInteger activeTab; // 0=fields, 1=har
+@property (nonatomic, strong) UIView *tabCryptoIndicator;
+@property (nonatomic, assign) NSInteger activeTab; // 0=fields, 1=har, 2=crypto
 @property (nonatomic, strong) UIView *detailOverlayView;
+
+@property (nonatomic, strong) UIScrollView *cryptoScrollView;
+@property (nonatomic, strong) NSMutableArray *cryptoRecords;
 
 @property (nonatomic, strong) UILabel *titleLabel;
 @property (nonatomic, strong) UILabel *statusLabel;
@@ -236,17 +242,23 @@ static NSDictionary *g_lastHeaders = nil;
 - (void)copyCookieToClipboard;
 - (void)exportHAR;
 - (void)recordAPIRequest:(NSString *)api url:(NSString *)url method:(NSString *)method headers:(NSDictionary *)headers body:(NSString *)body;
-- (void)recordAPIResponse:(NSString *)api response:(NSString *)response statusCode:(NSInteger)code;
+- (void)recordAPIResponse:(NSString *)api response:(NSString *)response statusCode:(NSInteger)code respHeaders:(NSDictionary *)respHeaders httpVersion:(NSString *)httpVersion mimeType:(NSString *)mimeType;
 - (void)switchTab:(NSInteger)tabIndex;
 - (void)refreshHarList;
 - (void)tabFieldsTapped;
 - (void)tabHarTapped;
+- (void)tabCryptoTapped;
 - (void)clearHar;
+- (void)clearCrypto;
+- (void)refreshCryptoList;
+- (void)exportCrypto;
+- (void)recordCryptoOperation:(NSString *)algorithm type:(NSString *)type input:(NSString *)input output:(NSString *)output key:(NSString *)key iv:(NSString *)iv;
 - (void)showHarDetail:(NSDictionary *)entry;
 - (void)dismissHarDetail;
 - (void)handleHarCardTap:(UITapGestureRecognizer *)gesture;
 - (void)copyHarRequest:(UIButton *)btn;
 - (void)copyHarResponse:(UIButton *)btn;
+- (void)handleCryptoLongPress:(UILongPressGestureRecognizer *)gesture;
 
 @end
 
@@ -309,6 +321,7 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
         _lastCookie = @"-";
         _pendingRequests = [NSMutableArray array];
         _harEntries = [NSMutableArray array];
+        _cryptoRecords = [NSMutableArray array];
         // 延迟创建窗口，确保 UIApplication 已就绪
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
@@ -438,7 +451,7 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
     tabDivider.backgroundColor = dividerColor;
     [self.tabBarView addSubview:tabDivider];
 
-    CGFloat tabW = windowW / 2;
+    CGFloat tabW = windowW / 3;
     self.tabFieldsBtn = [UIButton buttonWithType:UIButtonTypeSystem];
     self.tabFieldsBtn.frame = CGRectMake(0, 0, tabW, tabH);
     [self.tabFieldsBtn setTitle:@"Fields" forState:UIControlStateNormal];
@@ -455,6 +468,14 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
     [self.tabHarBtn addTarget:self action:@selector(tabHarTapped) forControlEvents:UIControlEventTouchUpInside];
     [self.tabBarView addSubview:self.tabHarBtn];
 
+    self.tabCryptoBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    self.tabCryptoBtn.frame = CGRectMake(tabW * 2, 0, tabW, tabH);
+    [self.tabCryptoBtn setTitle:@"Crypto" forState:UIControlStateNormal];
+    [self.tabCryptoBtn setTitleColor:tabInactiveColor forState:UIControlStateNormal];
+    self.tabCryptoBtn.titleLabel.font = [UIFont boldSystemFontOfSize:12];
+    [self.tabCryptoBtn addTarget:self action:@selector(tabCryptoTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.tabBarView addSubview:self.tabCryptoBtn];
+
     // Tab indicators (底部色条)
     self.tabFieldsIndicator = [[UIView alloc] initWithFrame:CGRectMake(tabW / 2 - 20, tabH - 3, 40, 3)];
     self.tabFieldsIndicator.backgroundColor = tabActiveColor;
@@ -466,6 +487,12 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
     self.tabHarIndicator.layer.cornerRadius = 1.5;
     self.tabHarIndicator.alpha = 0;
     [self.tabBarView addSubview:self.tabHarIndicator];
+
+    self.tabCryptoIndicator = [[UIView alloc] initWithFrame:CGRectMake(tabW * 2 + tabW / 2 - 20, tabH - 3, 40, 3)];
+    self.tabCryptoIndicator.backgroundColor = tabActiveColor;
+    self.tabCryptoIndicator.layer.cornerRadius = 1.5;
+    self.tabCryptoIndicator.alpha = 0;
+    [self.tabBarView addSubview:self.tabCryptoIndicator];
 
     // ---- Content area ----
     CGFloat footerH = 44;
@@ -661,6 +688,23 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
 
     self.harScrollView.contentSize = CGSizeMake(windowW, contentH);
 
+    // === Crypto ScrollView ===
+    self.cryptoScrollView = [[UIScrollView alloc] initWithFrame:CGRectMake(0, contentY, windowW, contentH)];
+    self.cryptoScrollView.backgroundColor = [UIColor clearColor];
+    self.cryptoScrollView.showsVerticalScrollIndicator = YES;
+    self.cryptoScrollView.alwaysBounceVertical = YES;
+    self.cryptoScrollView.hidden = YES;
+    [self.containerView addSubview:self.cryptoScrollView];
+
+    UILabel *cryptoEmpty = [[UILabel alloc] initWithFrame:CGRectMake(0, contentH / 2 - 30, windowW, 30)];
+    cryptoEmpty.text = @"No crypto operations yet";
+    cryptoEmpty.textColor = [UIColor colorWithRed:0.35 green:0.35 blue:0.40 alpha:1.0];
+    cryptoEmpty.font = [UIFont systemFontOfSize:13];
+    cryptoEmpty.textAlignment = NSTextAlignmentCenter;
+    cryptoEmpty.tag = 998;
+    [self.cryptoScrollView addSubview:cryptoEmpty];
+    self.cryptoScrollView.contentSize = CGSizeMake(windowW, contentH);
+
     // ---- Footer (44px) ----
     CGFloat footerY = windowH - footerH;
     self.footerView = [[UIView alloc] initWithFrame:CGRectMake(0, footerY, windowW, footerH)];
@@ -734,6 +778,31 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
     harClearBtn.tag = 888;
     harClearBtn.hidden = YES;
     [self.footerView addSubview:harClearBtn];
+
+    // Crypto footer buttons (hidden by default)
+    UIButton *cryptoExportBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    cryptoExportBtn.frame = CGRectMake(btnSpacing, btnY, harBtnW, btnH);
+    [cryptoExportBtn setTitle:@"Export Crypto" forState:UIControlStateNormal];
+    [cryptoExportBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    cryptoExportBtn.titleLabel.font = [UIFont systemFontOfSize:10];
+    cryptoExportBtn.backgroundColor = [UIColor colorWithRed:0.15 green:0.55 blue:0.45 alpha:0.85];
+    cryptoExportBtn.layer.cornerRadius = 6;
+    [cryptoExportBtn addTarget:self action:@selector(exportCrypto) forControlEvents:UIControlEventTouchUpInside];
+    cryptoExportBtn.tag = 889;
+    cryptoExportBtn.hidden = YES;
+    [self.footerView addSubview:cryptoExportBtn];
+
+    UIButton *cryptoClearBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    cryptoClearBtn.frame = CGRectMake(btnSpacing * 2 + harBtnW, btnY, harBtnW, btnH);
+    [cryptoClearBtn setTitle:@"Clear Crypto" forState:UIControlStateNormal];
+    [cryptoClearBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    cryptoClearBtn.titleLabel.font = [UIFont systemFontOfSize:10];
+    cryptoClearBtn.backgroundColor = [UIColor colorWithRed:0.55 green:0.18 blue:0.18 alpha:0.85];
+    cryptoClearBtn.layer.cornerRadius = 6;
+    [cryptoClearBtn addTarget:self action:@selector(clearCrypto) forControlEvents:UIControlEventTouchUpInside];
+    cryptoClearBtn.tag = 890;
+    cryptoClearBtn.hidden = YES;
+    [self.footerView addSubview:cryptoClearBtn];
 
     // 手势
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc]
@@ -833,6 +902,7 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
             self.containerView.frame = CGRectMake(0, 0, currentW, targetH);
             self.fieldsScrollView.hidden = self.collapsed ? YES : (self.activeTab != 0);
             self.harScrollView.hidden = self.collapsed ? YES : (self.activeTab != 1);
+            self.cryptoScrollView.hidden = self.collapsed ? YES : (self.activeTab != 2);
             self.tabBarView.hidden = self.collapsed;
             self.footerView.hidden = self.collapsed;
             [self.collapseBtn setTitle:self.collapsed ? @"▼" : @"▲" forState:UIControlStateNormal];
@@ -926,8 +996,8 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
     fmt.dateFormat = @"HH:mm:ss";
     NSString *timeStr = self.lastUpdate ? [fmt stringFromDate:self.lastUpdate] : @"--:--:--";
 
-    self.statusLabel.text = [NSString stringWithFormat:@"Count: %ld | HAR: %ld | %@",
-                              (long)self.captureCount, (long)self.harEntries.count, timeStr];
+    self.statusLabel.text = [NSString stringWithFormat:@"Count: %ld | HAR: %ld | Crypto: %ld | %@",
+                              (long)self.captureCount, (long)self.harEntries.count, (long)self.cryptoRecords.count, timeStr];
 
     // 截断 API 名称
     NSString *apiDisplay = self.lastAPI ?: @"-";
@@ -1001,12 +1071,31 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
             [hdrArr addObject:@{@"name": hk, @"value": [NSString stringWithFormat:@"%@", hdrs[hk]]}];
         }
         harReq[@"headers"] = hdrArr;
-        harReq[@"queryString"] = @[];
+        // queryString
+        NSMutableArray *qsArr = [NSMutableArray array];
+        NSString *pUrl = req[@"url"];
+        if (pUrl && pUrl.length > 0) {
+            NSRange qRange = [pUrl rangeOfString:@"?"];
+            if (qRange.location != NSNotFound && qRange.location + 1 < pUrl.length) {
+                NSString *qs = [pUrl substringFromIndex:qRange.location + 1];
+                for (NSString *pair in [qs componentsSeparatedByString:@"&"]) {
+                    NSRange eq = [pair rangeOfString:@"="];
+                    if (eq.location != NSNotFound) {
+                        [qsArr addObject:@{
+                            @"name": [pair substringToIndex:eq.location],
+                            @"value": [pair substringFromIndex:eq.location + 1]
+                        }];
+                    }
+                }
+            }
+        }
+        harReq[@"queryString"] = qsArr;
         harReq[@"headersSize"] = @(-1);
         NSString *bodyStr = req[@"body"] ?: @"";
         harReq[@"bodySize"] = @(bodyStr.length);
         if (bodyStr.length > 0 && ![bodyStr isEqualToString:@"-"]) {
-            harReq[@"postData"] = @{@"mimeType": @"application/json", @"text": bodyStr};
+            NSString *ct = hdrs[@"Content-Type"] ?: hdrs[@"content-type"] ?: @"application/json";
+            harReq[@"postData"] = @{@"mimeType": ct, @"text": bodyStr};
         }
         entry[@"request"] = harReq;
         // empty response
@@ -1111,7 +1200,7 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
     });
 }
 
-- (void)recordAPIResponse:(NSString *)api response:(NSString *)response statusCode:(NSInteger)code {
+- (void)recordAPIResponse:(NSString *)api response:(NSString *)response statusCode:(NSInteger)code respHeaders:(NSDictionary *)respHeaders httpVersion:(NSString *)httpVersion mimeType:(NSString *)mimeType {
     if (!api || api.length == 0) return;
     dispatch_async(dispatch_get_main_queue(), ^{
         // FIFO 查找匹配的 pending request
@@ -1148,33 +1237,59 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
         NSMutableDictionary *harReq = [NSMutableDictionary dictionary];
         harReq[@"method"] = pendingReq[@"method"] ?: @"GET";
         harReq[@"url"] = pendingReq[@"url"] ?: @"-";
-        harReq[@"httpVersion"] = @"HTTP/1.1";
+        harReq[@"httpVersion"] = httpVersion ?: @"HTTP/1.1";
         NSMutableArray *hdrArr = [NSMutableArray array];
         NSDictionary *hdrs = pendingReq[@"headers"];
         for (NSString *hk in hdrs) {
             [hdrArr addObject:@{@"name": hk, @"value": [NSString stringWithFormat:@"%@", hdrs[hk]]}];
         }
         harReq[@"headers"] = hdrArr;
-        harReq[@"queryString"] = @[];
+        // 解析 queryString
+        NSMutableArray *qsArr = [NSMutableArray array];
+        NSString *reqUrl = pendingReq[@"url"];
+        if (reqUrl && reqUrl.length > 0) {
+            NSRange qRange = [reqUrl rangeOfString:@"?"];
+            if (qRange.location != NSNotFound && qRange.location + 1 < reqUrl.length) {
+                NSString *qs = [reqUrl substringFromIndex:qRange.location + 1];
+                for (NSString *pair in [qs componentsSeparatedByString:@"&"]) {
+                    NSRange eq = [pair rangeOfString:@"="];
+                    if (eq.location != NSNotFound) {
+                        [qsArr addObject:@{
+                            @"name": [pair substringToIndex:eq.location],
+                            @"value": [pair substringFromIndex:eq.location + 1]
+                        }];
+                    }
+                }
+            }
+        }
+        harReq[@"queryString"] = qsArr;
         harReq[@"headersSize"] = @(-1);
         NSString *bodyStr = pendingReq[@"body"] ?: @"";
         harReq[@"bodySize"] = @(bodyStr.length);
         if (bodyStr.length > 0 && ![bodyStr isEqualToString:@"-"]) {
-            harReq[@"postData"] = @{@"mimeType": @"application/json", @"text": bodyStr};
+            // 检测 mimeType
+            NSString *reqCT = hdrs[@"Content-Type"] ?: hdrs[@"content-type"] ?: @"application/json";
+            harReq[@"postData"] = @{@"mimeType": reqCT, @"text": bodyStr};
         }
         entry[@"request"] = harReq;
         
-        // build response part
+        // build response part - 包含响应头
         NSString *respStr = response ?: @"";
         NSInteger respSize = respStr.length;
+        NSMutableArray *respHdrArr = [NSMutableArray array];
+        if (respHeaders) {
+            for (NSString *hk in respHeaders) {
+                [respHdrArr addObject:@{@"name": hk, @"value": [NSString stringWithFormat:@"%@", respHeaders[hk]]}];
+            }
+        }
         entry[@"response"] = @{
             @"status": @(code),
-            @"statusText": code > 0 ? @"OK" : @"(unknown)",
-            @"httpVersion": @"HTTP/1.1",
-            @"headers": @[],
+            @"statusText": code >= 200 && code < 300 ? @"OK" : (code > 0 ? [NSString stringWithFormat:@"%ld", (long)code] : @"(unknown)"),
+            @"httpVersion": httpVersion ?: @"HTTP/1.1",
+            @"headers": respHdrArr,
             @"cookies": @[],
-            @"content": @{@"mimeType": @"application/json", @"text": respStr, @"size": @(respSize)},
-            @"redirectURL": @"",
+            @"content": @{@"mimeType": mimeType ?: @"application/json", @"text": respStr, @"size": @(respSize)},
+            @"redirectURL": respHeaders[@"Location"] ?: @"",
             @"headersSize": @(-1),
             @"bodySize": @(respSize)
         };
@@ -1212,10 +1327,12 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
     self.lastUpdate = nil;
     [self.pendingRequests removeAllObjects];
     [self.harEntries removeAllObjects];
+    [self.cryptoRecords removeAllObjects];
     self.urlLabel.text = @"URL: -";
     self.cookieLabel.text = @"Cookie: -";
     [self updateStatusBar];
     [self refreshHarList];
+    [self refreshCryptoList];
     [self showToast:@"Cleared!"];
 }
 
@@ -1227,48 +1344,53 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
     [self switchTab:1];
 }
 
+- (void)tabCryptoTapped {
+    [self switchTab:2];
+}
+
 - (void)switchTab:(NSInteger)tabIndex {
     dispatch_async(dispatch_get_main_queue(), ^{
         self.activeTab = tabIndex;
         UIColor *activeColor = [UIColor colorWithRed:0.25 green:0.60 blue:1.0 alpha:1.0];
         UIColor *inactiveColor = [UIColor colorWithRed:0.45 green:0.45 blue:0.50 alpha:1.0];
 
-        if (tabIndex == 0) {
-            // Fields tab
-            self.fieldsScrollView.hidden = NO;
-            self.harScrollView.hidden = YES;
-            [self.tabFieldsBtn setTitleColor:activeColor forState:UIControlStateNormal];
-            [self.tabHarBtn setTitleColor:inactiveColor forState:UIControlStateNormal];
-            [UIView animateWithDuration:0.2 animations:^{
-                self.tabFieldsIndicator.alpha = 1.0;
-                self.tabHarIndicator.alpha = 0.0;
-            }];
-            // Footer buttons
-            self.exportBtn.hidden = NO;
-            self.cookieCopyBtn.hidden = NO;
-            self.clearButton.hidden = NO;
-            self.harExportBtn.hidden = YES;
-            UIView *harClear = [self.footerView viewWithTag:888];
-            harClear.hidden = YES;
-        } else {
-            // HAR tab
-            self.fieldsScrollView.hidden = YES;
-            self.harScrollView.hidden = NO;
-            [self.tabFieldsBtn setTitleColor:inactiveColor forState:UIControlStateNormal];
-            [self.tabHarBtn setTitleColor:activeColor forState:UIControlStateNormal];
-            [UIView animateWithDuration:0.2 animations:^{
-                self.tabFieldsIndicator.alpha = 0.0;
-                self.tabHarIndicator.alpha = 1.0;
-            }];
-            // Footer buttons
-            self.exportBtn.hidden = YES;
-            self.cookieCopyBtn.hidden = YES;
-            self.clearButton.hidden = YES;
-            self.harExportBtn.hidden = NO;
-            UIView *harClear = [self.footerView viewWithTag:888];
-            harClear.hidden = NO;
-            // Refresh HAR list
+        // ScrollView visibility
+        self.fieldsScrollView.hidden = (tabIndex != 0);
+        self.harScrollView.hidden = (tabIndex != 1);
+        self.cryptoScrollView.hidden = (tabIndex != 2);
+
+        // Tab button colors
+        [self.tabFieldsBtn setTitleColor:(tabIndex == 0 ? activeColor : inactiveColor) forState:UIControlStateNormal];
+        [self.tabHarBtn setTitleColor:(tabIndex == 1 ? activeColor : inactiveColor) forState:UIControlStateNormal];
+        [self.tabCryptoBtn setTitleColor:(tabIndex == 2 ? activeColor : inactiveColor) forState:UIControlStateNormal];
+
+        // Tab indicators
+        [UIView animateWithDuration:0.2 animations:^{
+            self.tabFieldsIndicator.alpha = (tabIndex == 0 ? 1.0 : 0.0);
+            self.tabHarIndicator.alpha = (tabIndex == 1 ? 1.0 : 0.0);
+            self.tabCryptoIndicator.alpha = (tabIndex == 2 ? 1.0 : 0.0);
+        }];
+
+        // Footer buttons
+        // Fields footer (tag: none, explicit properties)
+        self.exportBtn.hidden = (tabIndex != 0);
+        self.cookieCopyBtn.hidden = (tabIndex != 0);
+        self.clearButton.hidden = (tabIndex != 0);
+        // HAR footer
+        self.harExportBtn.hidden = (tabIndex != 1);
+        UIView *harClear = [self.footerView viewWithTag:888];
+        harClear.hidden = (tabIndex != 1);
+        // Crypto footer
+        UIView *cryptoExport = [self.footerView viewWithTag:889];
+        cryptoExport.hidden = (tabIndex != 2);
+        UIView *cryptoClear = [self.footerView viewWithTag:890];
+        cryptoClear.hidden = (tabIndex != 2);
+
+        // Refresh content
+        if (tabIndex == 1) {
             [self refreshHarList];
+        } else if (tabIndex == 2) {
+            [self refreshCryptoList];
         }
     });
 }
@@ -1561,9 +1683,11 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
         [detailScroll addSubview:reqHeader];
         cy += 20;
 
-        // Method
+        // Method + HTTP Version
         UILabel *methodLabel = [[UILabel alloc] initWithFrame:CGRectMake(pad, cy, lblW, 16)];
-        methodLabel.text = [NSString stringWithFormat:@"Method: %@", req[@"method"] ?: @"?"];
+        methodLabel.text = [NSString stringWithFormat:@"Method: %@  HTTP: %@",
+                            req[@"method"] ?: @"?",
+                            req[@"httpVersion"] ?: @"HTTP/1.1"];
         methodLabel.textColor = [UIColor colorWithRed:0.50 green:0.58 blue:0.65 alpha:1.0];
         methodLabel.font = [UIFont fontWithName:@"Menlo" size:10];
         [detailScroll addSubview:methodLabel];
@@ -1580,9 +1704,31 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
         [detailScroll addSubview:urlLabel];
         cy += 22;
 
+        // Query String
+        NSArray *qsArr = req[@"queryString"] ?: @[];
+        if (qsArr.count > 0) {
+            UILabel *qsTitle = [[UILabel alloc] initWithFrame:CGRectMake(pad, cy, lblW, 14)];
+            qsTitle.text = @"Query Parameters:";
+            qsTitle.textColor = [UIColor colorWithRed:0.50 green:0.58 blue:0.65 alpha:1.0];
+            qsTitle.font = [UIFont boldSystemFontOfSize:9];
+            [detailScroll addSubview:qsTitle];
+            cy += 14;
+            for (NSDictionary *qs in qsArr) {
+                UILabel *qsLabel = [[UILabel alloc] initWithFrame:CGRectMake(pad + 8, cy, lblW - 8, 12)];
+                qsLabel.text = [NSString stringWithFormat:@"%@ = %@", qs[@"name"] ?: @"?", qs[@"value"] ?: @""];
+                qsLabel.textColor = [UIColor colorWithRed:0.70 green:0.65 blue:0.85 alpha:1.0];
+                qsLabel.font = [UIFont fontWithName:@"Menlo" size:8];
+                qsLabel.adjustsFontSizeToFitWidth = YES;
+                qsLabel.minimumScaleFactor = 0.4;
+                qsLabel.numberOfLines = 2;
+                [detailScroll addSubview:qsLabel];
+                cy += 14;
+            }
+        }
+
         // Headers
         UILabel *hdrTitle = [[UILabel alloc] initWithFrame:CGRectMake(pad, cy, lblW, 16)];
-        hdrTitle.text = @"Headers:";
+        hdrTitle.text = @"Request Headers:";
         hdrTitle.textColor = [UIColor colorWithRed:0.50 green:0.58 blue:0.65 alpha:1.0];
         hdrTitle.font = [UIFont boldSystemFontOfSize:9];
         [detailScroll addSubview:hdrTitle];
@@ -1590,10 +1736,20 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
 
         NSArray *headers = req[@"headers"] ?: @[];
         for (NSDictionary *hdr in headers) {
-            NSString *hdrText = [NSString stringWithFormat:@"%@: %@", hdr[@"name"] ?: @"?", hdr[@"value"] ?: @"?"];
+            NSString *hdrName = hdr[@"name"] ?: @"?";
+            NSString *hdrVal = hdr[@"value"] ?: @"?";
+            // 高亮关键头
+            UIColor *hdrColor = [UIColor colorWithRed:0.60 green:0.60 blue:0.65 alpha:1.0];
+            NSString *lowerName = [hdrName lowercaseString];
+            if ([lowerName containsString:@"cookie"] || [lowerName containsString:@"token"] ||
+                [lowerName containsString:@"user-agent"] || [lowerName containsString:@"authorization"] ||
+                [lowerName containsString:@"x-sign"] || [lowerName containsString:@"x-sid"] ||
+                [lowerName containsString:@"x-mini-wua"] || [lowerName containsString:@"x-uid"]) {
+                hdrColor = [UIColor colorWithRed:0.90 green:0.70 blue:0.30 alpha:1.0];
+            }
             UILabel *hdrLabel = [[UILabel alloc] initWithFrame:CGRectMake(pad + 8, cy, lblW - 8, 14)];
-            hdrLabel.text = hdrText;
-            hdrLabel.textColor = [UIColor colorWithRed:0.60 green:0.60 blue:0.65 alpha:1.0];
+            hdrLabel.text = [NSString stringWithFormat:@"%@: %@", hdrName, hdrVal];
+            hdrLabel.textColor = hdrColor;
             hdrLabel.font = [UIFont fontWithName:@"Menlo" size:8];
             hdrLabel.adjustsFontSizeToFitWidth = YES;
             hdrLabel.minimumScaleFactor = 0.4;
@@ -1604,11 +1760,15 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
 
         // Request Body
         NSString *bodyStr = @"";
+        NSString *reqMime = @"application/json";
         if (req[@"postData"][@"text"]) {
             bodyStr = req[@"postData"][@"text"];
         }
+        if (req[@"postData"][@"mimeType"]) {
+            reqMime = req[@"postData"][@"mimeType"];
+        }
         UILabel *bodyTitle = [[UILabel alloc] initWithFrame:CGRectMake(pad, cy, lblW, 16)];
-        bodyTitle.text = @"Request Body:";
+        bodyTitle.text = [NSString stringWithFormat:@"Request Body (%@):", reqMime];
         bodyTitle.textColor = [UIColor colorWithRed:0.50 green:0.58 blue:0.65 alpha:1.0];
         bodyTitle.font = [UIFont boldSystemFontOfSize:9];
         [detailScroll addSubview:bodyTitle];
@@ -1652,14 +1812,43 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
         [detailScroll addSubview:respHeader];
         cy += 20;
 
-        // Status
+        // Status + HTTP Version + MIME
         NSInteger statusCode = [resp[@"status"] integerValue];
+        NSString *respMime = resp[@"content"][@"mimeType"] ?: @"?";
         UILabel *statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(pad, cy, lblW, 16)];
-        statusLabel.text = [NSString stringWithFormat:@"Status: %ld", (long)statusCode];
+        statusLabel.text = [NSString stringWithFormat:@"Status: %ld  HTTP: %@  Type: %@",
+                            (long)statusCode,
+                            resp[@"httpVersion"] ?: @"HTTP/1.1",
+                            respMime];
         statusLabel.textColor = [UIColor colorWithRed:0.50 green:0.58 blue:0.65 alpha:1.0];
-        statusLabel.font = [UIFont fontWithName:@"Menlo" size:10];
+        statusLabel.font = [UIFont fontWithName:@"Menlo" size:9];
+        statusLabel.adjustsFontSizeToFitWidth = YES;
+        statusLabel.minimumScaleFactor = 0.5;
+        statusLabel.numberOfLines = 2;
         [detailScroll addSubview:statusLabel];
         cy += 18;
+
+        // Response Headers
+        NSArray *respHeaders = resp[@"headers"] ?: @[];
+        if (respHeaders.count > 0) {
+            UILabel *respHdrTitle = [[UILabel alloc] initWithFrame:CGRectMake(pad, cy, lblW, 14)];
+            respHdrTitle.text = @"Response Headers:";
+            respHdrTitle.textColor = [UIColor colorWithRed:0.50 green:0.58 blue:0.65 alpha:1.0];
+            respHdrTitle.font = [UIFont boldSystemFontOfSize:9];
+            [detailScroll addSubview:respHdrTitle];
+            cy += 14;
+            for (NSDictionary *rhdr in respHeaders) {
+                UILabel *rhdrLabel = [[UILabel alloc] initWithFrame:CGRectMake(pad + 8, cy, lblW - 8, 12)];
+                rhdrLabel.text = [NSString stringWithFormat:@"%@: %@", rhdr[@"name"] ?: @"?", rhdr[@"value"] ?: @"?"];
+                rhdrLabel.textColor = [UIColor colorWithRed:0.55 green:0.65 blue:0.55 alpha:1.0];
+                rhdrLabel.font = [UIFont fontWithName:@"Menlo" size:8];
+                rhdrLabel.adjustsFontSizeToFitWidth = YES;
+                rhdrLabel.minimumScaleFactor = 0.4;
+                rhdrLabel.numberOfLines = 2;
+                [detailScroll addSubview:rhdrLabel];
+                cy += 14;
+            }
+        }
 
         // Response Body
         NSString *respStr = @"";
@@ -1792,6 +1981,243 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
     });
 }
 
+#pragma mark - Crypto Tab
+
+- (void)recordCryptoOperation:(NSString *)algorithm type:(NSString *)type input:(NSString *)input output:(NSString *)output key:(NSString *)key iv:(NSString *)iv {
+    if (!algorithm || algorithm.length == 0) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSMutableDictionary *rec = [NSMutableDictionary dictionary];
+        rec[@"algorithm"] = algorithm;
+        rec[@"type"] = type ?: @"unknown";
+        rec[@"input"] = input ?: @"";
+        rec[@"output"] = output ?: @"";
+        rec[@"key"] = key ?: @"";
+        rec[@"iv"] = iv ?: @"";
+        // 时间戳
+        NSDateFormatter *isoFmt = [[NSDateFormatter alloc] init];
+        isoFmt.dateFormat = @"yyyy-MM-dd'T'HH:mm:ss.SSS'Z'";
+        isoFmt.timeZone = [NSTimeZone timeZoneWithAbbreviation:@"UTC"];
+        isoFmt.locale = [[NSLocale alloc] initWithLocaleIdentifier:@"en_US_POSIX"];
+        rec[@"timestamp"] = [isoFmt stringFromDate:[NSDate date]];
+        [self.cryptoRecords addObject:rec];
+        NSLog(@"[ElemeFieldMonitor] Crypto op #%ld: %@ (%@)", (long)self.cryptoRecords.count, algorithm, type);
+        [self updateStatusBar];
+        if (self.activeTab == 2) {
+            [self refreshCryptoList];
+        }
+    });
+}
+
+- (void)refreshCryptoList {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        // 清除旧内容（保留 tag=998 空状态标签）
+        NSMutableArray *toRemove = [NSMutableArray array];
+        for (UIView *sub in self.cryptoScrollView.subviews) {
+            if (sub.tag != 998) {
+                [toRemove addObject:sub];
+            }
+        }
+        for (UIView *sub in toRemove) {
+            [sub removeFromSuperview];
+        }
+
+        // 空状态标签
+        UILabel *emptyLabel = (UILabel *)[self.cryptoScrollView viewWithTag:998];
+        if (emptyLabel) {
+            emptyLabel.hidden = (self.cryptoRecords.count > 0);
+        }
+
+        CGFloat cy = 8;
+        CGFloat sidePad = 10;
+        CGFloat cardW = self.cryptoScrollView.bounds.size.width - sidePad * 2;
+        CGFloat cardH = 76;
+        CGFloat cardSpacing = 6;
+
+        for (NSInteger i = (NSInteger)self.cryptoRecords.count - 1; i >= 0; i--) {
+            NSDictionary *rec = self.cryptoRecords[i];
+            NSString *algo = rec[@"algorithm"] ?: @"?";
+            NSString *type = rec[@"type"] ?: @"?";
+            NSString *inputStr = rec[@"input"] ?: @"";
+            NSString *outputStr = rec[@"output"] ?: @"";
+            NSString *keyStr = rec[@"key"] ?: @"";
+            NSString *ivStr = rec[@"iv"] ?: @"";
+            NSString *ts = rec[@"timestamp"] ?: @"";
+
+            // 根据类型决定颜色
+            UIColor *typeColor;
+            if ([type containsString:@"hash"] || [type containsString:@"Hash"]) {
+                typeColor = [UIColor colorWithRed:0.75 green:0.55 blue:0.20 alpha:1.0]; // 橙色
+            } else if ([type containsString:@"hmac"] || [type containsString:@"HMAC"]) {
+                typeColor = [UIColor colorWithRed:0.85 green:0.45 blue:0.65 alpha:1.0]; // 粉色
+            } else if ([type containsString:@"encrypt"] || [type containsString:@"Encrypt"]) {
+                typeColor = [UIColor colorWithRed:0.20 green:0.65 blue:0.85 alpha:1.0]; // 青色
+            } else if ([type containsString:@"decrypt"] || [type containsString:@"Decrypt"]) {
+                typeColor = [UIColor colorWithRed:0.30 green:0.75 blue:0.40 alpha:1.0]; // 绿色
+            } else {
+                typeColor = [UIColor colorWithRed:0.55 green:0.55 blue:0.60 alpha:1.0];
+            }
+
+            UIView *card = [[UIView alloc] initWithFrame:CGRectMake(sidePad, cy, cardW, cardH)];
+            card.backgroundColor = [UIColor colorWithRed:0.10 green:0.10 blue:0.13 alpha:0.85];
+            card.layer.cornerRadius = 8;
+            card.layer.masksToBounds = YES;
+            card.tag = 2000 + (int)i;
+
+            // 算法名 + 类型
+            UILabel *algoLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 4, cardW - 20, 16)];
+            algoLabel.text = [NSString stringWithFormat:@"%@  [%@]", algo, type];
+            algoLabel.textColor = typeColor;
+            algoLabel.font = [UIFont boldSystemFontOfSize:11];
+            [card addSubview:algoLabel];
+
+            // 时间戳
+            UILabel *tsLabel = [[UILabel alloc] initWithFrame:CGRectMake(cardW - 130, 4, 120, 14)];
+            NSString *shortTs = ts;
+            if (shortTs.length > 20) shortTs = [shortTs substringFromIndex:shortTs.length - 13];
+            tsLabel.text = shortTs;
+            tsLabel.textColor = [UIColor colorWithRed:0.40 green:0.40 blue:0.45 alpha:1.0];
+            tsLabel.font = [UIFont systemFontOfSize:8];
+            tsLabel.textAlignment = NSTextAlignmentRight;
+            [card addSubview:tsLabel];
+
+            // Input
+            UILabel *inLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 22, cardW - 20, 16)];
+            NSString *inDisp = inputStr;
+            if (inDisp.length > 50) inDisp = [NSString stringWithFormat:@"%@...", [inDisp substringToIndex:50]];
+            inLabel.text = [NSString stringWithFormat:@"In: %@", inDisp];
+            inLabel.textColor = [UIColor colorWithRed:0.60 green:0.65 blue:0.75 alpha:1.0];
+            inLabel.font = [UIFont fontWithName:@"Menlo" size:8];
+            inLabel.adjustsFontSizeToFitWidth = YES;
+            inLabel.minimumScaleFactor = 0.4;
+            [card addSubview:inLabel];
+
+            // Output
+            UILabel *outLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 38, cardW - 20, 16)];
+            NSString *outDisp = outputStr;
+            if (outDisp.length > 50) outDisp = [NSString stringWithFormat:@"%@...", [outDisp substringToIndex:50]];
+            outLabel.text = [NSString stringWithFormat:@"Out: %@", outDisp];
+            outLabel.textColor = [UIColor colorWithRed:0.65 green:0.80 blue:0.55 alpha:1.0];
+            outLabel.font = [UIFont fontWithName:@"Menlo" size:8];
+            outLabel.adjustsFontSizeToFitWidth = YES;
+            outLabel.minimumScaleFactor = 0.4;
+            [card addSubview:outLabel];
+
+            // Key/IV
+            NSString *keyInfo = @"";
+            if (keyStr.length > 0) {
+                keyInfo = [NSString stringWithFormat:@"Key: %@", keyStr.length > 30 ? [NSString stringWithFormat:@"%@...", [keyStr substringToIndex:30]] : keyStr];
+            }
+            if (ivStr.length > 0) {
+                if (keyInfo.length > 0) keyInfo = [keyInfo stringByAppendingString:@"  "];
+                keyInfo = [keyInfo stringByAppendingFormat:@"IV: %@", ivStr.length > 30 ? [NSString stringWithFormat:@"%@...", [ivStr substringToIndex:30]] : ivStr];
+            }
+            if (keyInfo.length > 0) {
+                UILabel *keyLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 54, cardW - 20, 16)];
+                keyLabel.text = keyInfo;
+                keyLabel.textColor = [UIColor colorWithRed:0.90 green:0.70 blue:0.30 alpha:1.0];
+                keyLabel.font = [UIFont fontWithName:@"Menlo" size:8];
+                keyLabel.adjustsFontSizeToFitWidth = YES;
+                keyLabel.minimumScaleFactor = 0.4;
+                [card addSubview:keyLabel];
+            }
+
+            // 长按复制
+            UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc]
+                initWithTarget:self action:@selector(handleCryptoLongPress:)];
+            lp.minimumPressDuration = 0.5;
+            [card addGestureRecognizer:lp];
+
+            [self.cryptoScrollView addSubview:card];
+            cy += cardH + cardSpacing;
+        }
+
+        self.cryptoScrollView.contentSize = CGSizeMake(self.cryptoScrollView.bounds.size.width, cy + 8);
+    });
+}
+
+- (void)handleCryptoLongPress:(UILongPressGestureRecognizer *)gesture {
+    if (gesture.state != UIGestureRecognizerStateBegan) return;
+    UIView *card = gesture.view;
+    NSInteger tag = card.tag;
+    if (tag < 2000) return;
+    NSInteger idx = tag - 2000;
+    // 倒序映射: UI 是倒序显示的
+    NSInteger actualIdx = (NSInteger)self.cryptoRecords.count - 1 - idx;
+    if (actualIdx < 0 || actualIdx >= (NSInteger)self.cryptoRecords.count) return;
+    NSDictionary *rec = self.cryptoRecords[actualIdx];
+    NSString *output = rec[@"output"] ?: @"";
+    if (output.length > 0) {
+        UIPasteboard.generalPasteboard.string = output;
+        [self showToast:@"Output copied!"];
+    }
+}
+
+- (void)clearCrypto {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self.cryptoRecords removeAllObjects];
+        [self updateStatusBar];
+        [self refreshCryptoList];
+        [self showToast:@"Crypto cleared!"];
+    });
+}
+
+- (void)exportCrypto {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (self.cryptoRecords.count == 0) {
+            [self showToast:@"No crypto records to export!"];
+            return;
+        }
+
+        NSMutableArray *exportRecords = [NSMutableArray array];
+        for (NSDictionary *rec in self.cryptoRecords) {
+            NSMutableDictionary *exportRec = [NSMutableDictionary dictionary];
+            exportRec[@"algorithm"] = rec[@"algorithm"] ?: @"";
+            exportRec[@"type"] = rec[@"type"] ?: @"";
+            exportRec[@"input"] = rec[@"input"] ?: @"";
+            exportRec[@"output"] = rec[@"output"] ?: @"";
+            exportRec[@"key"] = rec[@"key"] ?: @"";
+            exportRec[@"iv"] = rec[@"iv"] ?: @"";
+            exportRec[@"timestamp"] = rec[@"timestamp"] ?: @"";
+            [exportRecords addObject:exportRec];
+        }
+
+        NSDateFormatter *exportFmt = [[NSDateFormatter alloc] init];
+        exportFmt.dateFormat = @"yyyy-MM-dd'T'HH:mm:ss.SSS'Z'";
+        exportFmt.timeZone = [NSTimeZone timeZoneWithAbbreviation:@"UTC"];
+        exportFmt.locale = [[NSLocale alloc] initWithLocaleIdentifier:@"en_US_POSIX"];
+
+        NSDictionary *exportData = @{
+            @"exportTime": [exportFmt stringFromDate:[NSDate date]],
+            @"totalRecords": @(exportRecords.count),
+            @"records": exportRecords
+        };
+
+        NSData *jsonData = [NSJSONSerialization dataWithJSONObject:exportData options:NSJSONWritingPrettyPrinted error:nil];
+        if (!jsonData) {
+            [self showToast:@"Failed to generate JSON!"];
+            return;
+        }
+
+        NSDateFormatter *fileFmt = [[NSDateFormatter alloc] init];
+        fileFmt.dateFormat = @"yyyyMMdd_HHmmss";
+        fileFmt.locale = [[NSLocale alloc] initWithLocaleIdentifier:@"en_US_POSIX"];
+        NSString *fileName = [NSString stringWithFormat:@"crypto_%@.json", [fileFmt stringFromDate:[NSDate date]]];
+        NSString *tmpPath = [NSTemporaryDirectory() stringByAppendingPathComponent:fileName];
+        [jsonData writeToFile:tmpPath atomically:YES];
+        NSURL *fileURL = [NSURL fileURLWithPath:tmpPath];
+
+        UIActivityViewController *avc = [[UIActivityViewController alloc] initWithActivityItems:@[fileURL] applicationActivities:nil];
+        // iPad support
+        if (avc.popoverPresentationController) {
+            avc.popoverPresentationController.sourceView = self.containerView;
+            avc.popoverPresentationController.sourceRect = CGRectMake(self.containerView.bounds.size.width / 2, self.containerView.bounds.size.height / 2, 1, 1);
+            avc.popoverPresentationController.permittedArrowDirections = 0;
+        }
+        [self.window.rootViewController presentViewController:avc animated:YES completion:nil];
+        NSLog(@"[ElemeFieldMonitor] Crypto export: %lu records -> %@", (unsigned long)exportRecords.count, fileName);
+    });
+}
+
 - (void)showToast:(NSString *)msg {
     UILabel *toast = [[UILabel alloc] init];
     toast.text = msg;
@@ -1880,13 +2306,19 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
                     // MTOP 响应
                     [[FloatWindowManager sharedInstance] recordAPIResponse:api
                                                                    response:rawStr
-                                                                  statusCode:0];
+                                                                  statusCode:0
+                                                                 respHeaders:nil
+                                                                 httpVersion:@"HTTP/1.1"
+                                                                     mimeType:@"application/json"];
                     NSLog(@"[ElemeFieldMonitor] Target API response (JSON) captured: %@", api);
                 } else {
                     // 未知类型，默认当响应
                     [[FloatWindowManager sharedInstance] recordAPIResponse:api
                                                                    response:rawStr
-                                                                  statusCode:0];
+                                                                  statusCode:0
+                                                                 respHeaders:nil
+                                                                 httpVersion:@"HTTP/1.1"
+                                                                     mimeType:@"application/json"];
                     NSLog(@"[ElemeFieldMonitor] Target API unknown (JSON) captured: %@", api);
                 }
             }
@@ -2054,12 +2486,26 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
                 if (effectiveAPI && effectiveAPI.length > 0) {
                     NSString *respStr = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] ?: @"-";
                     NSInteger statusCode = 0;
+                    NSDictionary *respHdrs = nil;
+                    NSString *httpVer = @"HTTP/1.1";
+                    NSString *respMime = @"application/json";
                     if ([response isKindOfClass:[NSHTTPURLResponse class]]) {
-                        statusCode = ((NSHTTPURLResponse *)response).statusCode;
+                        NSHTTPURLResponse *httpResp = (NSHTTPURLResponse *)response;
+                        statusCode = httpResp.statusCode;
+                        respHdrs = httpResp.allHeaderFields;
+                        respMime = httpResp.MIMEType ?: @"application/json";
+                        // 尝试获取 HTTP 版本
+                        if ([httpResp respondsToSelector:@selector(valueForHTTPHeaderField:)]) {
+                            NSString *spdy = [httpResp valueForHTTPHeaderField:@"X-SPDY"];
+                            if (spdy) httpVer = @"HTTP/2.0";
+                        }
                     }
                     [[FloatWindowManager sharedInstance] recordAPIResponse:effectiveAPI
                                                                    response:respStr
-                                                                  statusCode:statusCode];
+                                                                  statusCode:statusCode
+                                                                 respHeaders:respHdrs
+                                                                 httpVersion:httpVer
+                                                                     mimeType:respMime];
                     NSLog(@"[ElemeFieldMonitor] API response captured: %@", effectiveAPI);
                 }
             } @catch (NSException *e) {}
@@ -2180,12 +2626,21 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
         if (api && api.length > 0) {
             NSString *respStr = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] ?: @"-";
             NSInteger statusCode = 0;
+            NSDictionary *respHdrs = nil;
+            NSString *httpVer = @"HTTP/1.1";
+            NSString *respMime = @"application/json";
             if (response && [*response isKindOfClass:[NSHTTPURLResponse class]]) {
-                statusCode = ((NSHTTPURLResponse *)*response).statusCode;
+                NSHTTPURLResponse *httpResp = (NSHTTPURLResponse *)*response;
+                statusCode = httpResp.statusCode;
+                respHdrs = httpResp.allHeaderFields;
+                respMime = httpResp.MIMEType ?: @"application/json";
             }
             [[FloatWindowManager sharedInstance] recordAPIResponse:api
                                                            response:respStr
-                                                          statusCode:statusCode];
+                                                          statusCode:statusCode
+                                                         respHeaders:respHdrs
+                                                         httpVersion:httpVer
+                                                             mimeType:respMime];
             NSLog(@"[ElemeFieldMonitor] API response (sync) captured: %@", api);
         }
     }
@@ -2209,12 +2664,21 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
             if (api && api.length > 0) {
                 NSString *respStr = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] ?: @"-";
                 NSInteger statusCode = 0;
+                NSDictionary *respHdrs = nil;
+                NSString *httpVer = @"HTTP/1.1";
+                NSString *respMime = @"application/json";
                 if ([response isKindOfClass:[NSHTTPURLResponse class]]) {
-                    statusCode = ((NSHTTPURLResponse *)response).statusCode;
+                    NSHTTPURLResponse *httpResp = (NSHTTPURLResponse *)response;
+                    statusCode = httpResp.statusCode;
+                    respHdrs = httpResp.allHeaderFields;
+                    respMime = httpResp.MIMEType ?: @"application/json";
                 }
                 [[FloatWindowManager sharedInstance] recordAPIResponse:api
                                                                response:respStr
-                                                              statusCode:statusCode];
+                                                              statusCode:statusCode
+                                                             respHeaders:respHdrs
+                                                             httpVersion:httpVer
+                                                                 mimeType:respMime];
                 NSLog(@"[ElemeFieldMonitor] API response (async) captured: %@", api);
             }
         }
@@ -2268,13 +2732,277 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
 %end
 
 // ============================================================================
+// MARK: - Crypto Hooks (哈希/HMAC/加解密)
+// ============================================================================
+
+// 辅助函数: NSData -> hex 字符串
+static NSString *dataToHex(NSData *data) {
+    if (!data || data.length == 0) return @"";
+    const unsigned char *bytes = (const unsigned char *)data.bytes;
+    NSMutableString *hex = [NSMutableString stringWithCapacity:data.length * 2];
+    for (NSUInteger i = 0; i < data.length; i++) {
+        [hex appendFormat:@"%02x", bytes[i]];
+    }
+    return hex;
+}
+
+// 辅助函数: 尝试将 NSData 转为可读字符串
+static NSString *dataToString(NSData *data) {
+    if (!data || data.length == 0) return @"";
+    NSString *str = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    if (str) return str;
+    return dataToHex(data);
+}
+
+// --- Hook: CC_MD5 ---
+%hookf(unsigned char *, CC_MD5, const void *data, CC_LONG len, unsigned char *md) {
+    unsigned char *result = %orig;
+    if (result && len > 0) {
+        @try {
+            NSData *inputData = [NSData dataWithBytes:data length:len];
+            NSData *outputData = [NSData dataWithBytes:result length:CC_MD5_DIGEST_LENGTH];
+            NSString *inputStr = dataToString(inputData);
+            NSString *outputStr = dataToHex(outputData);
+            [[FloatWindowManager sharedInstance] recordCryptoOperation:@"MD5"
+                                                                   type:@"hash"
+                                                                  input:inputStr
+                                                                 output:outputStr
+                                                                    key:@""
+                                                                    iv:@""];
+        } @catch (NSException *e) {}
+    }
+    return result;
+}
+
+// --- Hook: CC_SHA1 ---
+%hookf(unsigned char *, CC_SHA1, const void *data, CC_LONG len, unsigned char *md) {
+    unsigned char *result = %orig;
+    if (result && len > 0) {
+        @try {
+            NSData *inputData = [NSData dataWithBytes:data length:len];
+            NSData *outputData = [NSData dataWithBytes:result length:CC_SHA1_DIGEST_LENGTH];
+            NSString *inputStr = dataToString(inputData);
+            NSString *outputStr = dataToHex(outputData);
+            [[FloatWindowManager sharedInstance] recordCryptoOperation:@"SHA1"
+                                                                   type:@"hash"
+                                                                  input:inputStr
+                                                                 output:outputStr
+                                                                    key:@""
+                                                                    iv:@""];
+        } @catch (NSException *e) {}
+    }
+    return result;
+}
+
+// --- Hook: CC_SHA256 ---
+%hookf(unsigned char *, CC_SHA256, const void *data, CC_LONG len, unsigned char *md) {
+    unsigned char *result = %orig;
+    if (result && len > 0) {
+        @try {
+            NSData *inputData = [NSData dataWithBytes:data length:len];
+            NSData *outputData = [NSData dataWithBytes:result length:CC_SHA256_DIGEST_LENGTH];
+            NSString *inputStr = dataToString(inputData);
+            NSString *outputStr = dataToHex(outputData);
+            [[FloatWindowManager sharedInstance] recordCryptoOperation:@"SHA256"
+                                                                   type:@"hash"
+                                                                  input:inputStr
+                                                                 output:outputStr
+                                                                    key:@""
+                                                                    iv:@""];
+        } @catch (NSException *e) {}
+    }
+    return result;
+}
+
+// --- Hook: CC_SHA512 ---
+%hookf(unsigned char *, CC_SHA512, const void *data, CC_LONG len, unsigned char *md) {
+    unsigned char *result = %orig;
+    if (result && len > 0) {
+        @try {
+            NSData *inputData = [NSData dataWithBytes:data length:len];
+            NSData *outputData = [NSData dataWithBytes:result length:CC_SHA512_DIGEST_LENGTH];
+            NSString *inputStr = dataToString(inputData);
+            NSString *outputStr = dataToHex(outputData);
+            [[FloatWindowManager sharedInstance] recordCryptoOperation:@"SHA512"
+                                                                   type:@"hash"
+                                                                  input:inputStr
+                                                                 output:outputStr
+                                                                    key:@""
+                                                                    iv:@""];
+        } @catch (NSException *e) {}
+    }
+    return result;
+}
+
+// --- Hook: CC_SHA224 ---
+%hookf(unsigned char *, CC_SHA224, const void *data, CC_LONG len, unsigned char *md) {
+    unsigned char *result = %orig;
+    if (result && len > 0) {
+        @try {
+            NSData *inputData = [NSData dataWithBytes:data length:len];
+            NSData *outputData = [NSData dataWithBytes:result length:CC_SHA224_DIGEST_LENGTH];
+            NSString *inputStr = dataToString(inputData);
+            NSString *outputStr = dataToHex(outputData);
+            [[FloatWindowManager sharedInstance] recordCryptoOperation:@"SHA224"
+                                                                   type:@"hash"
+                                                                  input:inputStr
+                                                                 output:outputStr
+                                                                    key:@""
+                                                                    iv:@""];
+        } @catch (NSException *e) {}
+    }
+    return result;
+}
+
+// --- Hook: CC_SHA384 ---
+%hookf(unsigned char *, CC_SHA384, const void *data, CC_LONG len, unsigned char *md) {
+    unsigned char *result = %orig;
+    if (result && len > 0) {
+        @try {
+            NSData *inputData = [NSData dataWithBytes:data length:len];
+            NSData *outputData = [NSData dataWithBytes:result length:CC_SHA384_DIGEST_LENGTH];
+            NSString *inputStr = dataToString(inputData);
+            NSString *outputStr = dataToHex(outputData);
+            [[FloatWindowManager sharedInstance] recordCryptoOperation:@"SHA384"
+                                                                   type:@"hash"
+                                                                  input:inputStr
+                                                                 output:outputStr
+                                                                    key:@""
+                                                                    iv:@""];
+        } @catch (NSException *e) {}
+    }
+    return result;
+}
+
+// --- Hook: CCHmac ---
+// 用静态字典存储 ctx 指针对应的算法名和密钥 (CCHmacContext 是 C 结构体，不能用 objc_setAssociatedObject)
+static NSMutableDictionary *g_hmacContexts = nil;
+
+%hookf(void, CCHmacInit, CCHmacContext *ctx, CCHmacAlgorithm algorithm, const void *key, size_t keyLength) {
+    %orig;
+    if (ctx) {
+        @try {
+            NSString *algoName = @"UnknownHMAC";
+            switch (algorithm) {
+                case kCCHmacAlgMD5:    algoName = @"HMAC-MD5"; break;
+                case kCCHmacAlgSHA1:   algoName = @"HMAC-SHA1"; break;
+                case kCCHmacAlgSHA256: algoName = @"HMAC-SHA256"; break;
+                case kCCHmacAlgSHA384: algoName = @"HMAC-SHA384"; break;
+                case kCCHmacAlgSHA512: algoName = @"HMAC-SHA512"; break;
+                case kCCHmacAlgSHA224: algoName = @"HMAC-SHA224"; break;
+            }
+            NSData *keyData = [NSData dataWithBytes:key length:keyLength];
+            NSString *keyStr = dataToString(keyData);
+            if (!g_hmacContexts) g_hmacContexts = [NSMutableDictionary dictionary];
+            NSString *ctxKey = [NSString stringWithFormat:@"%p", ctx];
+            @synchronized(g_hmacContexts) {
+                g_hmacContexts[ctxKey] = @{@"algo": algoName, @"key": keyStr};
+            }
+        } @catch (NSException *e) {}
+    }
+}
+
+%hookf(void, CCHmacFinal, CCHmacContext *ctx, void *macOut) {
+    %orig;
+    if (ctx && macOut) {
+        @try {
+            NSString *ctxKey = [NSString stringWithFormat:@"%p", ctx];
+            NSDictionary *ctxInfo = nil;
+            @synchronized(g_hmacContexts) {
+                ctxInfo = g_hmacContexts[ctxKey];
+                [g_hmacContexts removeObjectForKey:ctxKey];
+            }
+            if (ctxInfo) {
+                NSString *algoName = ctxInfo[@"algo"];
+                NSString *keyStr = ctxInfo[@"key"];
+                // 根据算法确定输出长度
+                size_t macLen = 0;
+                if ([algoName containsString:@"MD5"]) macLen = CC_MD5_DIGEST_LENGTH;
+                else if ([algoName containsString:@"SHA1"]) macLen = CC_SHA1_DIGEST_LENGTH;
+                else if ([algoName containsString:@"SHA256"]) macLen = CC_SHA256_DIGEST_LENGTH;
+                else if ([algoName containsString:@"SHA384"]) macLen = 48;
+                else if ([algoName containsString:@"SHA512"]) macLen = CC_SHA512_DIGEST_LENGTH;
+                else if ([algoName containsString:@"SHA224"]) macLen = CC_SHA224_DIGEST_LENGTH;
+                if (macLen > 0) {
+                    NSData *outputData = [NSData dataWithBytes:macOut length:macLen];
+                    NSString *outputStr = dataToHex(outputData);
+                    [[FloatWindowManager sharedInstance] recordCryptoOperation:algoName
+                                                                           type:@"hmac"
+                                                                          input:@"(streamed)"
+                                                                         output:outputStr
+                                                                            key:keyStr ?: @""
+                                                                            iv:@""];
+                }
+            }
+        } @catch (NSException *e) {}
+    }
+}
+
+// --- Hook: CCCrypt (AES/DES/3DES/RC4/RC2/Blowfish) ---
+%hookf(CCCryptorStatus, CCCrypt, CCOperation op, CCAlgorithm alg, CCOptions options,
+       const void *key, size_t keyLength,
+       const void *iv, size_t ivLength,
+       const void *dataIn, size_t dataInLength,
+       void *dataOut, size_t dataOutAvailable, size_t *dataOutMoved) {
+    CCCryptorStatus status = %orig;
+    if (status == kCCSuccess) {
+        @try {
+            // 算法名
+            NSString *algoName = @"Unknown";
+            switch (alg) {
+                case kCCAlgorithmAES: algoName = @"AES"; break;
+                case kCCAlgorithmDES: algoName = @"DES"; break;
+                case kCCAlgorithm3DES: algoName = @"3DES"; break;
+                case kCCAlgorithmCAST: algoName = @"CAST"; break;
+                case kCCAlgorithmRC4: algoName = @"RC4"; break;
+                case kCCAlgorithmRC2: algoName = @"RC2"; break;
+                case kCCAlgorithmBlowfish: algoName = @"Blowfish"; break;
+            }
+            // 操作类型
+            NSString *typeStr = (op == kCCEncrypt) ? @"encrypt" : @"decrypt";
+            // 输入
+            NSString *inputStr = @"(empty)";
+            if (dataIn && dataInLength > 0) {
+                NSData *inData = [NSData dataWithBytes:dataIn length:dataInLength];
+                inputStr = dataToString(inData);
+            }
+            // 输出
+            NSString *outputStr = @"(empty)";
+            if (dataOut && dataOutMoved && *dataOutMoved > 0) {
+                NSData *outData = [NSData dataWithBytes:dataOut length:*dataOutMoved];
+                outputStr = dataToString(outData);
+            }
+            // 密钥
+            NSString *keyStr = @"";
+            if (key && keyLength > 0) {
+                NSData *keyData = [NSData dataWithBytes:key length:keyLength];
+                keyStr = dataToString(keyData);
+            }
+            // IV
+            NSString *ivStr = @"";
+            if (iv && ivLength > 0) {
+                NSData *ivData = [NSData dataWithBytes:iv length:ivLength];
+                ivStr = dataToString(ivData);
+            }
+            [[FloatWindowManager sharedInstance] recordCryptoOperation:algoName
+                                                                   type:typeStr
+                                                                  input:inputStr
+                                                                 output:outputStr
+                                                                    key:keyStr
+                                                                    iv:ivStr];
+        } @catch (NSException *e) {}
+    }
+    return status;
+}
+
+// ============================================================================
 // MARK: - 构造函数
 // ============================================================================
 
 %ctor {
     NSLog(@"[ElemeFieldMonitor] ============================================");
     NSLog(@"[ElemeFieldMonitor] Tweak loaded into me.ele.ios.eleme");
-    NSLog(@"[ElemeFieldMonitor] Monitoring: encryptSceneCode, encryptActCode, rightId, sourceFrom, sceneCode, actCode + Cookie + API Records");
+    NSLog(@"[ElemeFieldMonitor] Monitoring: encryptSceneCode, encryptActCode, rightId, sourceFrom, sceneCode, actCode + Cookie + API Records + Crypto (MD5/SHA/HMAC/AES/DES)");
     NSLog(@"[ElemeFieldMonitor] ============================================");
 
     // 初始化悬浮窗管理器 (触发 dispatch_once 创建实例)

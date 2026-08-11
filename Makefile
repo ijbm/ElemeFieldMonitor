@@ -8,7 +8,7 @@ TWEAK_NAME = ElemeFieldMonitor
 
 ElemeFieldMonitor_FILES = Tweak.x
 ElemeFieldMonitor_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -Wno-unused-variable -Wno-unused-function
-ElemeFieldMonitor_FRAMEWORKS = UIKit Foundation
+ElemeFieldMonitor_FRAMEWORKS = UIKit Foundation Security
 ElemeFieldMonitor_PRIVATE_FRAMEWORKS = 
 
 include $(THEOS_MAKE_PATH)/tweak.mk
