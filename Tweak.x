@@ -34,6 +34,29 @@ static NSArray *kTargetKeys(void) {
     return keys;
 }
 
+// 需要完整记录请求/响应的目标 API
+static NSArray *kTargetAPIs(void) {
+    static NSArray *apis = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        apis = @[
+            @"mtop.alsc.upp.lottery.act.consult",
+            @"mtop.alsc.upp.lottery.act.lottery",
+            @"mtop.alsc.upp.market.timelimitdraw.consultunit",
+            @"mtop.alsc.upp.market.timelimitdraw.draw"
+        ];
+    });
+    return apis;
+}
+
+static BOOL isTargetAPI(NSString *api) {
+    if (!api || api.length == 0) return NO;
+    for (NSString *target in kTargetAPIs()) {
+        if ([api containsString:target]) return YES;
+    }
+    return NO;
+}
+
 // ============================================================================
 // MARK: - 字段搜索工具
 // ============================================================================
@@ -157,6 +180,7 @@ static NSArray *kTargetKeys(void) {
 @property (nonatomic, strong) UIButton *clearButton;
 @property (nonatomic, strong) UIButton *collapseBtn;
 @property (nonatomic, strong) UIButton *historyBtn;
+@property (nonatomic, strong) UIButton *apiExportBtn;
 @property (nonatomic, strong) UIButton *cookieCopyBtn;
 @property (nonatomic, strong) UILabel *urlLabel;
 @property (nonatomic, strong) UILabel *cookieLabel;
@@ -164,6 +188,7 @@ static NSArray *kTargetKeys(void) {
 @property (nonatomic, strong) NSString *lastCookie;
 @property (nonatomic, assign) BOOL collapsed;
 @property (nonatomic, strong) NSMutableArray *historyRecords;
+@property (nonatomic, strong) NSMutableArray *apiRecords;
 
 + (instancetype)sharedInstance;
 - (void)show;
@@ -176,7 +201,10 @@ static NSArray *kTargetKeys(void) {
 - (void)copyAllToClipboard;
 - (void)copyCookieToClipboard;
 - (void)exportHistory;
+- (void)exportAPIRecords;
 - (void)saveHistorySnapshot:(NSString *)source api:(NSString *)api;
+- (void)recordAPIRequest:(NSString *)api url:(NSString *)url method:(NSString *)method headers:(NSDictionary *)headers body:(NSString *)body;
+- (void)recordAPIResponse:(NSString *)api response:(NSString *)response statusCode:(NSInteger)code;
 
 @end
 
@@ -203,6 +231,7 @@ static NSArray *kTargetKeys(void) {
         _lastURL = @"-";
         _lastCookie = @"-";
         _historyRecords = [NSMutableArray array];
+        _apiRecords = [NSMutableArray array];
         // 延迟创建窗口，确保 UIApplication 已就绪
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
@@ -416,18 +445,29 @@ static NSArray *kTargetKeys(void) {
 
     // Export History button
     self.historyBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    self.historyBtn.frame = CGRectMake(160, 6, 72, 28);
-    [self.historyBtn setTitle:@"📤 Export" forState:UIControlStateNormal];
+    self.historyBtn.frame = CGRectMake(160, 6, 60, 28);
+    [self.historyBtn setTitle:@"📤 Hist" forState:UIControlStateNormal];
     [self.historyBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    self.historyBtn.titleLabel.font = [UIFont systemFontOfSize:10];
+    self.historyBtn.titleLabel.font = [UIFont systemFontOfSize:9];
     self.historyBtn.backgroundColor = [UIColor colorWithRed:0.2 green:0.55 blue:0.3 alpha:0.8];
     self.historyBtn.layer.cornerRadius = 6;
     [self.historyBtn addTarget:self action:@selector(exportHistory) forControlEvents:UIControlEventTouchUpInside];
     [self.footerView addSubview:self.historyBtn];
 
+    // API Export button
+    self.apiExportBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    self.apiExportBtn.frame = CGRectMake(224, 6, 60, 28);
+    [self.apiExportBtn setTitle:@"🔗 API" forState:UIControlStateNormal];
+    [self.apiExportBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    self.apiExportBtn.titleLabel.font = [UIFont systemFontOfSize:9];
+    self.apiExportBtn.backgroundColor = [UIColor colorWithRed:0.6 green:0.3 blue:0.6 alpha:0.8];
+    self.apiExportBtn.layer.cornerRadius = 6;
+    [self.apiExportBtn addTarget:self action:@selector(exportAPIRecords) forControlEvents:UIControlEventTouchUpInside];
+    [self.footerView addSubview:self.apiExportBtn];
+
     // Clear button
     self.clearButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    self.clearButton.frame = CGRectMake(windowW - 80, 6, 72, 28);
+    self.clearButton.frame = CGRectMake(windowW - 68, 6, 60, 28);
     [self.clearButton setTitle:@"🗑 Clear" forState:UIControlStateNormal];
     [self.clearButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     self.clearButton.titleLabel.font = [UIFont systemFontOfSize:10];
@@ -713,6 +753,60 @@ static NSArray *kTargetKeys(void) {
     [self showToast:@"Cookie copied!"];
 }
 
+- (void)exportAPIRecords {
+    if (self.apiRecords.count == 0) {
+        [self showToast:@"No API records!"];
+        return;
+    }
+    NSDictionary *export = @{
+        @"app": @"ElemeFieldMonitor",
+        @"exportTime": [[NSDate date] description],
+        @"totalAPIRecords": @(self.apiRecords.count),
+        @"targetAPIs": kTargetAPIs(),
+        @"records": self.apiRecords
+    };
+    NSData *data = [NSJSONSerialization dataWithJSONObject:export options:NSJSONWritingPrettyPrinted error:nil];
+    NSString *jsonStr = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    UIPasteboard.generalPasteboard.string = jsonStr;
+    [self showToast:[NSString stringWithFormat:@"Exported %ld API records!", (long)self.apiRecords.count]];
+}
+
+- (void)recordAPIRequest:(NSString *)api url:(NSString *)url method:(NSString *)method headers:(NSDictionary *)headers body:(NSString *)body {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSMutableDictionary *record = [NSMutableDictionary dictionary];
+        record[@"api"] = api ?: @"-";
+        record[@"url"] = url ?: @"-";
+        record[@"method"] = method ?: @"GET";
+        record[@"requestHeaders"] = headers ?: @{};
+        record[@"requestBody"] = body ?: @"-";
+        record[@"_timestamp"] = [[NSDate date] description];
+        record[@"_type"] = @"request";
+        record[@"_index"] = @(self.apiRecords.count + 1);
+        [self.apiRecords addObject:record];
+        if (self.apiRecords.count > 200) {
+            [self.apiRecords removeObjectAtIndex:0];
+        }
+        NSLog(@"[ElemeFieldMonitor] API Record #%ld: %@", (long)self.apiRecords.count, api);
+    });
+}
+
+- (void)recordAPIResponse:(NSString *)api response:(NSString *)response statusCode:(NSInteger)code {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSMutableDictionary *record = [NSMutableDictionary dictionary];
+        record[@"api"] = api ?: @"-";
+        record[@"responseBody"] = response ?: @"-";
+        record[@"statusCode"] = @(code);
+        record[@"_timestamp"] = [[NSDate date] description];
+        record[@"_type"] = @"response";
+        record[@"_index"] = @(self.apiRecords.count + 1);
+        [self.apiRecords addObject:record];
+        if (self.apiRecords.count > 200) {
+            [self.apiRecords removeObjectAtIndex:0];
+        }
+        NSLog(@"[ElemeFieldMonitor] API Response #%ld: %@", (long)self.apiRecords.count, api);
+    });
+}
+
 - (void)exportHistory {
     if (self.historyRecords.count == 0) {
         [self showToast:@"No history to export!"];
@@ -749,6 +843,7 @@ static NSArray *kTargetKeys(void) {
     self.lastCookie = @"-";
     self.lastUpdate = nil;
     [self.historyRecords removeAllObjects];
+    [self.apiRecords removeAllObjects];
     self.urlLabel.text = @"URL: -";
     self.cookieLabel.text = @"Cookie: -";
     [self updateStatusBar];
@@ -907,6 +1002,20 @@ static NSArray *kTargetKeys(void) {
         [[FloatWindowManager sharedInstance] updateCookie:cookieHeader];
     }
 
+    // 如果是目标 API，记录完整请求信息
+    if (isTargetAPI(requestAPI)) {
+        NSString *bodyStr = @"-";
+        if (body) {
+            bodyStr = [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding] ?: @"-";
+        }
+        [[FloatWindowManager sharedInstance] recordAPIRequest:requestAPI
+                                                           url:url.absoluteString
+                                                        method:request.HTTPMethod ?: @"GET"
+                                                       headers:headers ?: @{}
+                                                          body:bodyStr];
+        NSLog(@"[ElemeFieldMonitor] Target API request captured: %@", requestAPI);
+    }
+
     // ---- 包装 completionHandler 拦截响应 ----
     void (^wrappedHandler)(NSData *, NSURLResponse *, NSError *) = ^(NSData *data, NSURLResponse *response, NSError *error) {
         // 捕获响应中的 Set-Cookie
@@ -936,6 +1045,20 @@ static NSArray *kTargetKeys(void) {
                     [[FloatWindowManager sharedInstance] updateWithDictionary:respResults
                                                                         source:@"Response"
                                                                            api:respAPI ?: requestAPI];
+                }
+                
+                // 如果是目标 API，记录完整响应
+                NSString *effectiveAPI = respAPI ?: requestAPI;
+                if (isTargetAPI(effectiveAPI)) {
+                    NSString *respStr = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] ?: @"-";
+                    NSInteger statusCode = 0;
+                    if ([response isKindOfClass:[NSHTTPURLResponse class]]) {
+                        statusCode = ((NSHTTPURLResponse *)response).statusCode;
+                    }
+                    [[FloatWindowManager sharedInstance] recordAPIResponse:effectiveAPI
+                                                                   response:respStr
+                                                                  statusCode:statusCode];
+                    NSLog(@"[ElemeFieldMonitor] Target API response captured: %@", effectiveAPI);
                 }
             } @catch (NSException *e) {}
         }
@@ -1025,7 +1148,7 @@ static NSArray *kTargetKeys(void) {
 %ctor {
     NSLog(@"[ElemeFieldMonitor] ============================================");
     NSLog(@"[ElemeFieldMonitor] Tweak loaded into me.ele.ios.eleme");
-    NSLog(@"[ElemeFieldMonitor] Monitoring: encryptSceneCode, encryptActCode, rightId, sourceFrom, sceneCode, actCode + Cookie");
+    NSLog(@"[ElemeFieldMonitor] Monitoring: encryptSceneCode, encryptActCode, rightId, sourceFrom, sceneCode, actCode + Cookie + API Records");
     NSLog(@"[ElemeFieldMonitor] ============================================");
 
     // 初始化悬浮窗管理器 (触发 dispatch_once 创建实例)
