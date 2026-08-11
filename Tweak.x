@@ -14,6 +14,7 @@
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
 #import <CommonCrypto/CommonCrypto.h>
+#import <dlfcn.h>
 
 // 安全标志: FloatWindowManager 初始化完成后才记录 crypto 操作
 static volatile BOOL g_cryptoReady = NO;
