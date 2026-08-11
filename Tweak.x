@@ -1031,9 +1031,9 @@ static BOOL isTargetAPI(NSString *api) {
             @try {
                 NSMutableDictionary *respResults = [NSMutableDictionary dictionary];
                 [FieldHunter searchInBody:data results:respResults];
+                // 尝试从响应中提取 API 名称
+                NSString *respAPI = nil;
                 if (respResults.count > 0) {
-                    // 尝试从响应中提取 API 名称
-                    NSString *respAPI = nil;
                     @try {
                         id respJson = [NSJSONSerialization JSONObjectWithData:data
                                                                       options:NSJSONReadingAllowFragments
