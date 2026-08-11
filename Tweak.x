@@ -560,19 +560,21 @@ static NSArray *kTargetKeys(void) {
             }
         }
 
-        // 只有当至少捕获到 2 个字段时才记录历史
-        NSInteger capturedFields = 0;
-        for (NSString *key in kTargetKeys()) {
-            if (self.fieldValues[key]) capturedFields++;
+        // 只有当包含重要字段时才更新显示和历史
+        // sceneCode/sourceFrom 太常见，不能作为唯一触发条件
+        NSArray *importantKeys = @[@"encryptSceneCode", @"encryptActCode", @"rightId", @"actCode"];
+        BOOL hasImportant = NO;
+        for (NSString *ik in importantKeys) {
+            if (results[ik]) { hasImportant = YES; break; }
         }
         
-        if (hasNewData || api) {
+        if (hasNewData || (api && hasImportant)) {
             self.captureCount += 1;
             self.lastUpdate = [NSDate date];
             if (api) self.lastAPI = api;
             if (source) self.lastSource = source;
-            // 只有有价值的记录才保存历史
-            if (capturedFields >= 2 || hasNewData) {
+            // 只有包含重要字段的记录才保存历史
+            if (hasImportant) {
                 [self saveHistorySnapshot:source api:api];
             }
             [self updateStatusBar];
@@ -593,6 +595,26 @@ static NSArray *kTargetKeys(void) {
     snapshot[@"_url"] = self.lastURL ?: @"-";
     snapshot[@"_timestamp"] = [self.lastUpdate description] ?: @"-";
     snapshot[@"_index"] = @(self.historyRecords.count + 1);
+    
+    // 去重: 如果最后一条记录的所有字段值完全相同则跳过
+    if (self.historyRecords.count > 0) {
+        NSDictionary *last = self.historyRecords.lastObject;
+        BOOL isDuplicate = YES;
+        for (NSString *key in kTargetKeys()) {
+            NSString *oldVal = last[key];
+            NSString *newVal = snapshot[key];
+            if (![oldVal isEqualToString:newVal]) {
+                isDuplicate = NO;
+                break;
+            }
+        }
+        // API 不同也算新记录
+        if (![last[@"_api"] isEqualToString:snapshot[@"_api"]]) {
+            isDuplicate = NO;
+        }
+        if (isDuplicate) return;
+    }
+    
     [self.historyRecords addObject:snapshot];
     // 限制历史记录最多 500 条，防止内存溢出
     if (self.historyRecords.count > 500) {
