@@ -1021,9 +1021,61 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
         }
     };
     NSData *data = [NSJSONSerialization dataWithJSONObject:har options:NSJSONWritingPrettyPrinted error:nil];
-    NSString *jsonStr = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-    UIPasteboard.generalPasteboard.string = jsonStr;
-    [self showToast:[NSString stringWithFormat:@"Exported %ld HAR entries!", (long)allEntries.count]];
+
+    // 写入临时 .har 文件
+    NSString *tempDir = NSTemporaryDirectory();
+    NSString *fileName = [NSString stringWithFormat:@"eleme_%@.har",
+                          [[NSDate date] descriptionWithLocale:[NSLocale currentLocale]]
+                          ?: [NSString stringWithFormat:@"%ld", (long)[[NSDate date] timeIntervalSince1970]]];
+    // 清理文件名中的非法字符
+    NSCharacterSet *illegalChars = [NSCharacterSet characterSetWithCharactersInString:@":/\\ "];
+    fileName = [[fileName componentsSeparatedByCharactersInSet:illegalChars] componentsJoinedByString:@"_"];
+    NSString *filePath = [tempDir stringByAppendingPathComponent:fileName];
+    [data writeToFile:filePath atomically:YES];
+
+    // 通过 UIActivityViewController 分享文件
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSURL *fileURL = [NSURL fileURLWithPath:filePath];
+        UIActivityViewController *activityVC = [[UIActivityViewController alloc] initWithActivityItems:@[fileURL] applicationActivities:nil];
+        activityVC.completionWithItemsHandler = ^(NSString *activityType, BOOL completed, NSArray *returnedItems, NSError *activityError) {
+            // 清理临时文件
+            [[NSFileManager defaultManager] removeItemAtPath:filePath error:nil];
+            if (completed) {
+                [self showToast:[NSString stringWithFormat:@"HAR exported: %ld entries", (long)allEntries.count]];
+            }
+        };
+
+        // 找到合适的 ViewController 来 present
+        UIWindowScene *scene = nil;
+        for (UIScene *s in [UIApplication sharedApplication].connectedScenes.allObjects) {
+            if (s.activationState == UISceneActivationStateForegroundActive && [s isKindOfClass:[UIWindowScene class]]) {
+                scene = (UIWindowScene *)s;
+                break;
+            }
+        }
+        UIViewController *rootVC = nil;
+        if (scene) {
+            for (UIWindow *w in scene.windows) {
+                if (w != self.window && w.rootViewController) {
+                    rootVC = w.rootViewController;
+                    break;
+                }
+            }
+        }
+        if (rootVC) {
+            [rootVC presentViewController:activityVC animated:YES completion:nil];
+        } else {
+            // fallback: 用 self.window 的 rootViewController
+            if (self.window.rootViewController) {
+                [self.window.rootViewController presentViewController:activityVC animated:YES completion:nil];
+            } else {
+                // 最后 fallback: 复制到剪贴板
+                UIPasteboard.generalPasteboard.string = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+                [[NSFileManager defaultManager] removeItemAtPath:filePath error:nil];
+                [self showToast:@"HAR copied to clipboard (no VC)"];
+            }
+        }
+    });
 }
 
 - (void)recordAPIRequest:(NSString *)api url:(NSString *)url method:(NSString *)method headers:(NSDictionary *)headers body:(NSString *)body {
