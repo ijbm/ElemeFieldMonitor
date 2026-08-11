@@ -14,7 +14,6 @@
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
 
-
 // ============================================================================
 // MARK: - 目标字段定义
 // ============================================================================
@@ -237,11 +236,12 @@ static NSDictionary *g_lastHeaders = nil;
 - (void)copyCookieToClipboard;
 - (void)exportHAR;
 - (void)recordAPIRequest:(NSString *)api url:(NSString *)url method:(NSString *)method headers:(NSDictionary *)headers body:(NSString *)body;
-- (void)recordAPIResponse:(NSString *)api response:(NSString *)response statusCode:(NSInteger)code respHeaders:(NSDictionary *)respHeaders httpVersion:(NSString *)httpVersion mimeType:(NSString *)mimeType;
+- (void)recordAPIResponse:(NSString *)api response:(NSString *)response statusCode:(NSInteger)code;
 - (void)switchTab:(NSInteger)tabIndex;
 - (void)refreshHarList;
 - (void)tabFieldsTapped;
 - (void)tabHarTapped;
+- (void)clearHar;
 - (void)showHarDetail:(NSDictionary *)entry;
 - (void)dismissHarDetail;
 - (void)handleHarCardTap:(UITapGestureRecognizer *)gesture;
@@ -1001,31 +1001,12 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
             [hdrArr addObject:@{@"name": hk, @"value": [NSString stringWithFormat:@"%@", hdrs[hk]]}];
         }
         harReq[@"headers"] = hdrArr;
-        // queryString
-        NSMutableArray *qsArr = [NSMutableArray array];
-        NSString *pUrl = req[@"url"];
-        if (pUrl && pUrl.length > 0) {
-            NSRange qRange = [pUrl rangeOfString:@"?"];
-            if (qRange.location != NSNotFound && qRange.location + 1 < pUrl.length) {
-                NSString *qs = [pUrl substringFromIndex:qRange.location + 1];
-                for (NSString *pair in [qs componentsSeparatedByString:@"&"]) {
-                    NSRange eq = [pair rangeOfString:@"="];
-                    if (eq.location != NSNotFound) {
-                        [qsArr addObject:@{
-                            @"name": [pair substringToIndex:eq.location],
-                            @"value": [pair substringFromIndex:eq.location + 1]
-                        }];
-                    }
-                }
-            }
-        }
-        harReq[@"queryString"] = qsArr;
+        harReq[@"queryString"] = @[];
         harReq[@"headersSize"] = @(-1);
         NSString *bodyStr = req[@"body"] ?: @"";
         harReq[@"bodySize"] = @(bodyStr.length);
         if (bodyStr.length > 0 && ![bodyStr isEqualToString:@"-"]) {
-            NSString *ct = hdrs[@"Content-Type"] ?: hdrs[@"content-type"] ?: @"application/json";
-            harReq[@"postData"] = @{@"mimeType": ct, @"text": bodyStr};
+            harReq[@"postData"] = @{@"mimeType": @"application/json", @"text": bodyStr};
         }
         entry[@"request"] = harReq;
         // empty response
@@ -1130,7 +1111,7 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
     });
 }
 
-- (void)recordAPIResponse:(NSString *)api response:(NSString *)response statusCode:(NSInteger)code respHeaders:(NSDictionary *)respHeaders httpVersion:(NSString *)httpVersion mimeType:(NSString *)mimeType {
+- (void)recordAPIResponse:(NSString *)api response:(NSString *)response statusCode:(NSInteger)code {
     if (!api || api.length == 0) return;
     dispatch_async(dispatch_get_main_queue(), ^{
         // FIFO 查找匹配的 pending request
@@ -1167,59 +1148,33 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
         NSMutableDictionary *harReq = [NSMutableDictionary dictionary];
         harReq[@"method"] = pendingReq[@"method"] ?: @"GET";
         harReq[@"url"] = pendingReq[@"url"] ?: @"-";
-        harReq[@"httpVersion"] = httpVersion ?: @"HTTP/1.1";
+        harReq[@"httpVersion"] = @"HTTP/1.1";
         NSMutableArray *hdrArr = [NSMutableArray array];
         NSDictionary *hdrs = pendingReq[@"headers"];
         for (NSString *hk in hdrs) {
             [hdrArr addObject:@{@"name": hk, @"value": [NSString stringWithFormat:@"%@", hdrs[hk]]}];
         }
         harReq[@"headers"] = hdrArr;
-        // 解析 queryString
-        NSMutableArray *qsArr = [NSMutableArray array];
-        NSString *reqUrl = pendingReq[@"url"];
-        if (reqUrl && reqUrl.length > 0) {
-            NSRange qRange = [reqUrl rangeOfString:@"?"];
-            if (qRange.location != NSNotFound && qRange.location + 1 < reqUrl.length) {
-                NSString *qs = [reqUrl substringFromIndex:qRange.location + 1];
-                for (NSString *pair in [qs componentsSeparatedByString:@"&"]) {
-                    NSRange eq = [pair rangeOfString:@"="];
-                    if (eq.location != NSNotFound) {
-                        [qsArr addObject:@{
-                            @"name": [pair substringToIndex:eq.location],
-                            @"value": [pair substringFromIndex:eq.location + 1]
-                        }];
-                    }
-                }
-            }
-        }
-        harReq[@"queryString"] = qsArr;
+        harReq[@"queryString"] = @[];
         harReq[@"headersSize"] = @(-1);
         NSString *bodyStr = pendingReq[@"body"] ?: @"";
         harReq[@"bodySize"] = @(bodyStr.length);
         if (bodyStr.length > 0 && ![bodyStr isEqualToString:@"-"]) {
-            // 检测 mimeType
-            NSString *reqCT = hdrs[@"Content-Type"] ?: hdrs[@"content-type"] ?: @"application/json";
-            harReq[@"postData"] = @{@"mimeType": reqCT, @"text": bodyStr};
+            harReq[@"postData"] = @{@"mimeType": @"application/json", @"text": bodyStr};
         }
         entry[@"request"] = harReq;
         
-        // build response part - 包含响应头
+        // build response part
         NSString *respStr = response ?: @"";
         NSInteger respSize = respStr.length;
-        NSMutableArray *respHdrArr = [NSMutableArray array];
-        if (respHeaders) {
-            for (NSString *hk in respHeaders) {
-                [respHdrArr addObject:@{@"name": hk, @"value": [NSString stringWithFormat:@"%@", respHeaders[hk]]}];
-            }
-        }
         entry[@"response"] = @{
             @"status": @(code),
-            @"statusText": code >= 200 && code < 300 ? @"OK" : (code > 0 ? [NSString stringWithFormat:@"%ld", (long)code] : @"(unknown)"),
-            @"httpVersion": httpVersion ?: @"HTTP/1.1",
-            @"headers": respHdrArr,
+            @"statusText": code > 0 ? @"OK" : @"(unknown)",
+            @"httpVersion": @"HTTP/1.1",
+            @"headers": @[],
             @"cookies": @[],
-            @"content": @{@"mimeType": mimeType ?: @"application/json", @"text": respStr, @"size": @(respSize)},
-            @"redirectURL": respHeaders[@"Location"] ?: @"",
+            @"content": @{@"mimeType": @"application/json", @"text": respStr, @"size": @(respSize)},
+            @"redirectURL": @"",
             @"headersSize": @(-1),
             @"bodySize": @(respSize)
         };
@@ -1278,32 +1233,41 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
         UIColor *activeColor = [UIColor colorWithRed:0.25 green:0.60 blue:1.0 alpha:1.0];
         UIColor *inactiveColor = [UIColor colorWithRed:0.45 green:0.45 blue:0.50 alpha:1.0];
 
-        // ScrollView visibility
-        self.fieldsScrollView.hidden = (tabIndex != 0);
-        self.harScrollView.hidden = (tabIndex != 1);
-
-        // Tab button colors
-        [self.tabFieldsBtn setTitleColor:(tabIndex == 0 ? activeColor : inactiveColor) forState:UIControlStateNormal];
-        [self.tabHarBtn setTitleColor:(tabIndex == 1 ? activeColor : inactiveColor) forState:UIControlStateNormal];
-
-        // Tab indicators
-        [UIView animateWithDuration:0.2 animations:^{
-            self.tabFieldsIndicator.alpha = (tabIndex == 0 ? 1.0 : 0.0);
-            self.tabHarIndicator.alpha = (tabIndex == 1 ? 1.0 : 0.0);
-        }];
-
-        // Footer buttons
-        // Fields footer (tag: none, explicit properties)
-        self.exportBtn.hidden = (tabIndex != 0);
-        self.cookieCopyBtn.hidden = (tabIndex != 0);
-        self.clearButton.hidden = (tabIndex != 0);
-        // HAR footer
-        self.harExportBtn.hidden = (tabIndex != 1);
-        UIView *harClear = [self.footerView viewWithTag:888];
-        harClear.hidden = (tabIndex != 1);
-
-        // Refresh content
-        if (tabIndex == 1) {
+        if (tabIndex == 0) {
+            // Fields tab
+            self.fieldsScrollView.hidden = NO;
+            self.harScrollView.hidden = YES;
+            [self.tabFieldsBtn setTitleColor:activeColor forState:UIControlStateNormal];
+            [self.tabHarBtn setTitleColor:inactiveColor forState:UIControlStateNormal];
+            [UIView animateWithDuration:0.2 animations:^{
+                self.tabFieldsIndicator.alpha = 1.0;
+                self.tabHarIndicator.alpha = 0.0;
+            }];
+            // Footer buttons
+            self.exportBtn.hidden = NO;
+            self.cookieCopyBtn.hidden = NO;
+            self.clearButton.hidden = NO;
+            self.harExportBtn.hidden = YES;
+            UIView *harClear = [self.footerView viewWithTag:888];
+            harClear.hidden = YES;
+        } else {
+            // HAR tab
+            self.fieldsScrollView.hidden = YES;
+            self.harScrollView.hidden = NO;
+            [self.tabFieldsBtn setTitleColor:inactiveColor forState:UIControlStateNormal];
+            [self.tabHarBtn setTitleColor:activeColor forState:UIControlStateNormal];
+            [UIView animateWithDuration:0.2 animations:^{
+                self.tabFieldsIndicator.alpha = 0.0;
+                self.tabHarIndicator.alpha = 1.0;
+            }];
+            // Footer buttons
+            self.exportBtn.hidden = YES;
+            self.cookieCopyBtn.hidden = YES;
+            self.clearButton.hidden = YES;
+            self.harExportBtn.hidden = NO;
+            UIView *harClear = [self.footerView viewWithTag:888];
+            harClear.hidden = NO;
+            // Refresh HAR list
             [self refreshHarList];
         }
     });
@@ -1597,11 +1561,9 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
         [detailScroll addSubview:reqHeader];
         cy += 20;
 
-        // Method + HTTP Version
+        // Method
         UILabel *methodLabel = [[UILabel alloc] initWithFrame:CGRectMake(pad, cy, lblW, 16)];
-        methodLabel.text = [NSString stringWithFormat:@"Method: %@  HTTP: %@",
-                            req[@"method"] ?: @"?",
-                            req[@"httpVersion"] ?: @"HTTP/1.1"];
+        methodLabel.text = [NSString stringWithFormat:@"Method: %@", req[@"method"] ?: @"?"];
         methodLabel.textColor = [UIColor colorWithRed:0.50 green:0.58 blue:0.65 alpha:1.0];
         methodLabel.font = [UIFont fontWithName:@"Menlo" size:10];
         [detailScroll addSubview:methodLabel];
@@ -1618,31 +1580,9 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
         [detailScroll addSubview:urlLabel];
         cy += 22;
 
-        // Query String
-        NSArray *qsArr = req[@"queryString"] ?: @[];
-        if (qsArr.count > 0) {
-            UILabel *qsTitle = [[UILabel alloc] initWithFrame:CGRectMake(pad, cy, lblW, 14)];
-            qsTitle.text = @"Query Parameters:";
-            qsTitle.textColor = [UIColor colorWithRed:0.50 green:0.58 blue:0.65 alpha:1.0];
-            qsTitle.font = [UIFont boldSystemFontOfSize:9];
-            [detailScroll addSubview:qsTitle];
-            cy += 14;
-            for (NSDictionary *qs in qsArr) {
-                UILabel *qsLabel = [[UILabel alloc] initWithFrame:CGRectMake(pad + 8, cy, lblW - 8, 12)];
-                qsLabel.text = [NSString stringWithFormat:@"%@ = %@", qs[@"name"] ?: @"?", qs[@"value"] ?: @""];
-                qsLabel.textColor = [UIColor colorWithRed:0.70 green:0.65 blue:0.85 alpha:1.0];
-                qsLabel.font = [UIFont fontWithName:@"Menlo" size:8];
-                qsLabel.adjustsFontSizeToFitWidth = YES;
-                qsLabel.minimumScaleFactor = 0.4;
-                qsLabel.numberOfLines = 2;
-                [detailScroll addSubview:qsLabel];
-                cy += 14;
-            }
-        }
-
         // Headers
         UILabel *hdrTitle = [[UILabel alloc] initWithFrame:CGRectMake(pad, cy, lblW, 16)];
-        hdrTitle.text = @"Request Headers:";
+        hdrTitle.text = @"Headers:";
         hdrTitle.textColor = [UIColor colorWithRed:0.50 green:0.58 blue:0.65 alpha:1.0];
         hdrTitle.font = [UIFont boldSystemFontOfSize:9];
         [detailScroll addSubview:hdrTitle];
@@ -1650,20 +1590,10 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
 
         NSArray *headers = req[@"headers"] ?: @[];
         for (NSDictionary *hdr in headers) {
-            NSString *hdrName = hdr[@"name"] ?: @"?";
-            NSString *hdrVal = hdr[@"value"] ?: @"?";
-            // 高亮关键头
-            UIColor *hdrColor = [UIColor colorWithRed:0.60 green:0.60 blue:0.65 alpha:1.0];
-            NSString *lowerName = [hdrName lowercaseString];
-            if ([lowerName containsString:@"cookie"] || [lowerName containsString:@"token"] ||
-                [lowerName containsString:@"user-agent"] || [lowerName containsString:@"authorization"] ||
-                [lowerName containsString:@"x-sign"] || [lowerName containsString:@"x-sid"] ||
-                [lowerName containsString:@"x-mini-wua"] || [lowerName containsString:@"x-uid"]) {
-                hdrColor = [UIColor colorWithRed:0.90 green:0.70 blue:0.30 alpha:1.0];
-            }
+            NSString *hdrText = [NSString stringWithFormat:@"%@: %@", hdr[@"name"] ?: @"?", hdr[@"value"] ?: @"?"];
             UILabel *hdrLabel = [[UILabel alloc] initWithFrame:CGRectMake(pad + 8, cy, lblW - 8, 14)];
-            hdrLabel.text = [NSString stringWithFormat:@"%@: %@", hdrName, hdrVal];
-            hdrLabel.textColor = hdrColor;
+            hdrLabel.text = hdrText;
+            hdrLabel.textColor = [UIColor colorWithRed:0.60 green:0.60 blue:0.65 alpha:1.0];
             hdrLabel.font = [UIFont fontWithName:@"Menlo" size:8];
             hdrLabel.adjustsFontSizeToFitWidth = YES;
             hdrLabel.minimumScaleFactor = 0.4;
@@ -1674,15 +1604,11 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
 
         // Request Body
         NSString *bodyStr = @"";
-        NSString *reqMime = @"application/json";
         if (req[@"postData"][@"text"]) {
             bodyStr = req[@"postData"][@"text"];
         }
-        if (req[@"postData"][@"mimeType"]) {
-            reqMime = req[@"postData"][@"mimeType"];
-        }
         UILabel *bodyTitle = [[UILabel alloc] initWithFrame:CGRectMake(pad, cy, lblW, 16)];
-        bodyTitle.text = [NSString stringWithFormat:@"Request Body (%@):", reqMime];
+        bodyTitle.text = @"Request Body:";
         bodyTitle.textColor = [UIColor colorWithRed:0.50 green:0.58 blue:0.65 alpha:1.0];
         bodyTitle.font = [UIFont boldSystemFontOfSize:9];
         [detailScroll addSubview:bodyTitle];
@@ -1726,43 +1652,14 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
         [detailScroll addSubview:respHeader];
         cy += 20;
 
-        // Status + HTTP Version + MIME
+        // Status
         NSInteger statusCode = [resp[@"status"] integerValue];
-        NSString *respMime = resp[@"content"][@"mimeType"] ?: @"?";
         UILabel *statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(pad, cy, lblW, 16)];
-        statusLabel.text = [NSString stringWithFormat:@"Status: %ld  HTTP: %@  Type: %@",
-                            (long)statusCode,
-                            resp[@"httpVersion"] ?: @"HTTP/1.1",
-                            respMime];
+        statusLabel.text = [NSString stringWithFormat:@"Status: %ld", (long)statusCode];
         statusLabel.textColor = [UIColor colorWithRed:0.50 green:0.58 blue:0.65 alpha:1.0];
-        statusLabel.font = [UIFont fontWithName:@"Menlo" size:9];
-        statusLabel.adjustsFontSizeToFitWidth = YES;
-        statusLabel.minimumScaleFactor = 0.5;
-        statusLabel.numberOfLines = 2;
+        statusLabel.font = [UIFont fontWithName:@"Menlo" size:10];
         [detailScroll addSubview:statusLabel];
         cy += 18;
-
-        // Response Headers
-        NSArray *respHeaders = resp[@"headers"] ?: @[];
-        if (respHeaders.count > 0) {
-            UILabel *respHdrTitle = [[UILabel alloc] initWithFrame:CGRectMake(pad, cy, lblW, 14)];
-            respHdrTitle.text = @"Response Headers:";
-            respHdrTitle.textColor = [UIColor colorWithRed:0.50 green:0.58 blue:0.65 alpha:1.0];
-            respHdrTitle.font = [UIFont boldSystemFontOfSize:9];
-            [detailScroll addSubview:respHdrTitle];
-            cy += 14;
-            for (NSDictionary *rhdr in respHeaders) {
-                UILabel *rhdrLabel = [[UILabel alloc] initWithFrame:CGRectMake(pad + 8, cy, lblW - 8, 12)];
-                rhdrLabel.text = [NSString stringWithFormat:@"%@: %@", rhdr[@"name"] ?: @"?", rhdr[@"value"] ?: @"?"];
-                rhdrLabel.textColor = [UIColor colorWithRed:0.55 green:0.65 blue:0.55 alpha:1.0];
-                rhdrLabel.font = [UIFont fontWithName:@"Menlo" size:8];
-                rhdrLabel.adjustsFontSizeToFitWidth = YES;
-                rhdrLabel.minimumScaleFactor = 0.4;
-                rhdrLabel.numberOfLines = 2;
-                [detailScroll addSubview:rhdrLabel];
-                cy += 14;
-            }
-        }
 
         // Response Body
         NSString *respStr = @"";
@@ -1983,19 +1880,13 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
                     // MTOP 响应
                     [[FloatWindowManager sharedInstance] recordAPIResponse:api
                                                                    response:rawStr
-                                                                  statusCode:0
-                                                                 respHeaders:nil
-                                                                 httpVersion:@"HTTP/1.1"
-                                                                     mimeType:@"application/json"];
+                                                                  statusCode:0];
                     NSLog(@"[ElemeFieldMonitor] Target API response (JSON) captured: %@", api);
                 } else {
                     // 未知类型，默认当响应
                     [[FloatWindowManager sharedInstance] recordAPIResponse:api
                                                                    response:rawStr
-                                                                  statusCode:0
-                                                                 respHeaders:nil
-                                                                 httpVersion:@"HTTP/1.1"
-                                                                     mimeType:@"application/json"];
+                                                                  statusCode:0];
                     NSLog(@"[ElemeFieldMonitor] Target API unknown (JSON) captured: %@", api);
                 }
             }
@@ -2163,26 +2054,12 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
                 if (effectiveAPI && effectiveAPI.length > 0) {
                     NSString *respStr = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] ?: @"-";
                     NSInteger statusCode = 0;
-                    NSDictionary *respHdrs = nil;
-                    NSString *httpVer = @"HTTP/1.1";
-                    NSString *respMime = @"application/json";
                     if ([response isKindOfClass:[NSHTTPURLResponse class]]) {
-                        NSHTTPURLResponse *httpResp = (NSHTTPURLResponse *)response;
-                        statusCode = httpResp.statusCode;
-                        respHdrs = httpResp.allHeaderFields;
-                        respMime = httpResp.MIMEType ?: @"application/json";
-                        // 尝试获取 HTTP 版本
-                        if ([httpResp respondsToSelector:@selector(valueForHTTPHeaderField:)]) {
-                            NSString *spdy = [httpResp valueForHTTPHeaderField:@"X-SPDY"];
-                            if (spdy) httpVer = @"HTTP/2.0";
-                        }
+                        statusCode = ((NSHTTPURLResponse *)response).statusCode;
                     }
                     [[FloatWindowManager sharedInstance] recordAPIResponse:effectiveAPI
                                                                    response:respStr
-                                                                  statusCode:statusCode
-                                                                 respHeaders:respHdrs
-                                                                 httpVersion:httpVer
-                                                                     mimeType:respMime];
+                                                                  statusCode:statusCode];
                     NSLog(@"[ElemeFieldMonitor] API response captured: %@", effectiveAPI);
                 }
             } @catch (NSException *e) {}
@@ -2303,21 +2180,12 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
         if (api && api.length > 0) {
             NSString *respStr = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] ?: @"-";
             NSInteger statusCode = 0;
-            NSDictionary *respHdrs = nil;
-            NSString *httpVer = @"HTTP/1.1";
-            NSString *respMime = @"application/json";
             if (response && [*response isKindOfClass:[NSHTTPURLResponse class]]) {
-                NSHTTPURLResponse *httpResp = (NSHTTPURLResponse *)*response;
-                statusCode = httpResp.statusCode;
-                respHdrs = httpResp.allHeaderFields;
-                respMime = httpResp.MIMEType ?: @"application/json";
+                statusCode = ((NSHTTPURLResponse *)*response).statusCode;
             }
             [[FloatWindowManager sharedInstance] recordAPIResponse:api
                                                            response:respStr
-                                                          statusCode:statusCode
-                                                         respHeaders:respHdrs
-                                                         httpVersion:httpVer
-                                                             mimeType:respMime];
+                                                          statusCode:statusCode];
             NSLog(@"[ElemeFieldMonitor] API response (sync) captured: %@", api);
         }
     }
@@ -2341,21 +2209,12 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
             if (api && api.length > 0) {
                 NSString *respStr = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] ?: @"-";
                 NSInteger statusCode = 0;
-                NSDictionary *respHdrs = nil;
-                NSString *httpVer = @"HTTP/1.1";
-                NSString *respMime = @"application/json";
                 if ([response isKindOfClass:[NSHTTPURLResponse class]]) {
-                    NSHTTPURLResponse *httpResp = (NSHTTPURLResponse *)response;
-                    statusCode = httpResp.statusCode;
-                    respHdrs = httpResp.allHeaderFields;
-                    respMime = httpResp.MIMEType ?: @"application/json";
+                    statusCode = ((NSHTTPURLResponse *)response).statusCode;
                 }
                 [[FloatWindowManager sharedInstance] recordAPIResponse:api
                                                                response:respStr
-                                                              statusCode:statusCode
-                                                             respHeaders:respHdrs
-                                                             httpVersion:httpVer
-                                                                 mimeType:respMime];
+                                                              statusCode:statusCode];
                 NSLog(@"[ElemeFieldMonitor] API response (async) captured: %@", api);
             }
         }
