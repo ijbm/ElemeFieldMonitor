@@ -2762,9 +2762,13 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
 // ============================================================================
 #if 1  // CRYPTO_HOOKS_ENABLED
 
-// 最小化测试: 只 hook CC_SHA256，只调用 %orig，不做任何其他操作
-%hookf(unsigned char *, CC_SHA256, const void *data, CC_LONG len, unsigned char *md) {
-    return %orig;
+// 用 MSHookFunction 替代 %hookf，更底层更可靠
+static unsigned char *(*orig_CC_SHA256)(const void *data, CC_LONG len, unsigned char *md) = NULL;
+
+static unsigned char *hook_CC_SHA256(const void *data, CC_LONG len, unsigned char *md) {
+    unsigned char *result = orig_CC_SHA256(data, len, md);
+    // 暂时不做任何记录，只验证 MSHookFunction 是否可行
+    return result;
 }
 
 // --- Hook: CCHmac (暂时禁用排查闪退) ---
@@ -2905,6 +2909,10 @@ static NSMutableDictionary *g_hmacContexts = nil;
 
     // 初始化悬浮窗管理器 (触发 dispatch_once 创建实例)
     [FloatWindowManager sharedInstance];
+
+    // 用 MSHookFunction hook CC_SHA256
+    MSHookFunction((void *)CC_SHA256, (void *)hook_CC_SHA256, (void **)&orig_CC_SHA256);
+    NSLog(@"[ElemeFieldMonitor] CC_SHA256 hooked via MSHookFunction");
 
     // 延迟显示悬浮窗，确保 UI 已就绪
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)),
