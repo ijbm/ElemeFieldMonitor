@@ -134,7 +134,7 @@ static NSArray *kTargetKeys(void) {
 @property (nonatomic, strong) NSString *lastSource;
 @property (nonatomic, strong) NSDate *lastUpdate;
 
-@property (nonatomic, strong) UIButton *copyAllBtn;
+@property (nonatomic, strong) UIButton *exportBtn;
 @property (nonatomic, strong) UIButton *clearButton;
 
 + (instancetype)sharedInstance;
@@ -326,15 +326,15 @@ static NSArray *kTargetKeys(void) {
     [self.containerView addSubview:self.footerView];
 
     // Copy All button
-    self.copyAllBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-    self.copyAllBtn.frame = CGRectMake(12, 6, 140, 28);
-    [self.copyAllBtn setTitle:@"📋 Copy All JSON" forState:UIControlStateNormal];
-    [self.copyAllBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    self.copyAllBtn.titleLabel.font = [UIFont systemFontOfSize:12];
-    self.copyAllBtn.backgroundColor = [UIColor colorWithRed:0.15 green:0.4 blue:0.8 alpha:0.8];
-    self.copyAllBtn.layer.cornerRadius = 6;
-    [self.copyAllBtn addTarget:self action:@selector(copyAllToClipboard) forControlEvents:UIControlEventTouchUpInside];
-    [self.footerView addSubview:self.copyAllBtn];
+    self.exportBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    self.exportBtn.frame = CGRectMake(12, 6, 140, 28);
+    [self.exportBtn setTitle:@"📋 Copy All JSON" forState:UIControlStateNormal];
+    [self.exportBtn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    self.exportBtn.titleLabel.font = [UIFont systemFontOfSize:12];
+    self.exportBtn.backgroundColor = [UIColor colorWithRed:0.15 green:0.4 blue:0.8 alpha:0.8];
+    self.exportBtn.layer.cornerRadius = 6;
+    [self.exportBtn addTarget:self action:@selector(copyAllToClipboard) forControlEvents:UIControlEventTouchUpInside];
+    [self.footerView addSubview:self.exportBtn];
 
     // Clear button
     self.clearButton = [UIButton buttonWithType:UIButtonTypeSystem];
