@@ -13,6 +13,10 @@
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
+#import <sys/socket.h>
+#import <netinet/in.h>
+#import <arpa/inet.h>
+#import <unistd.h>
 
 // ============================================================================
 // MARK: - 目标字段定义
@@ -225,6 +229,8 @@ static NSString *g_lastResponseAPI = nil;
 @property (nonatomic, assign) BOOL collapsed;
 @property (nonatomic, strong) NSMutableArray *pendingRequests; // 每个 pending 请求 dict, 含 _api key
 @property (nonatomic, strong) NSMutableArray *harEntries;
+@property (nonatomic, strong) UITextField *harSearchField;
+@property (nonatomic, strong) NSString *harSearchQuery;
 
 + (instancetype)sharedInstance;
 - (void)show;
@@ -249,6 +255,7 @@ static NSString *g_lastResponseAPI = nil;
 - (void)handleHarCardTap:(UITapGestureRecognizer *)gesture;
 - (void)copyHarRequest:(UIButton *)btn;
 - (void)copyHarResponse:(UIButton *)btn;
+- (void)harSearchChanged:(UITextField *)field;
 
 @end
 
@@ -644,8 +651,29 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
 
     self.fieldsScrollView.contentSize = CGSizeMake(windowW, cy + 8);
 
+    // === HAR Search Bar (28px) ===
+    CGFloat searchH = 28;
+    self.harSearchField = [[UITextField alloc] initWithFrame:CGRectMake(sidePad, contentY, windowW - sidePad * 2, searchH)];
+    self.harSearchField.placeholder = @"Search API name or URL...";
+    self.harSearchField.font = [UIFont fontWithName:@"Menlo" size:11];
+    self.harSearchField.textColor = [UIColor colorWithRed:0.85 green:0.85 blue:0.90 alpha:1.0];
+    self.harSearchField.backgroundColor = [UIColor colorWithRed:0.12 green:0.12 blue:0.15 alpha:0.9];
+    self.harSearchField.layer.cornerRadius = 6;
+    self.harSearchField.layer.masksToBounds = YES;
+    self.harSearchField.leftView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 6, searchH)];
+    self.harSearchField.leftViewMode = UITextFieldViewModeAlways;
+    self.harSearchField.rightView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 6, searchH)];
+    self.harSearchField.rightViewMode = UITextFieldViewModeAlways;
+    self.harSearchField.attributedPlaceholder = [[NSAttributedString alloc] initWithString:@"Search API name or URL..." attributes:@{NSForegroundColorAttributeName: [UIColor colorWithRed:0.40 green:0.40 blue:0.45 alpha:1.0], NSFontAttributeName: [UIFont fontWithName:@"Menlo" size:11]}];
+    self.harSearchField.hidden = YES;
+    self.harSearchField.tag = 998;
+    [self.harSearchField addTarget:self action:@selector(harSearchChanged:) forControlEvents:UIControlEventEditingChanged];
+    [self.containerView addSubview:self.harSearchField];
+
     // === HAR ScrollView ===
-    self.harScrollView = [[UIScrollView alloc] initWithFrame:CGRectMake(0, contentY, windowW, contentH)];
+    CGFloat harScrollY = contentY + searchH;
+    CGFloat harScrollH = contentH - searchH;
+    self.harScrollView = [[UIScrollView alloc] initWithFrame:CGRectMake(0, harScrollY, windowW, harScrollH)];
     self.harScrollView.backgroundColor = [UIColor clearColor];
     self.harScrollView.showsVerticalScrollIndicator = YES;
     self.harScrollView.alwaysBounceVertical = YES;
@@ -653,7 +681,7 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
     [self.containerView addSubview:self.harScrollView];
 
     // HAR 空状态
-    UILabel *harEmpty = [[UILabel alloc] initWithFrame:CGRectMake(0, contentH / 2 - 30, windowW, 30)];
+    UILabel *harEmpty = [[UILabel alloc] initWithFrame:CGRectMake(0, harScrollH / 2 - 30, windowW, 30)];
     harEmpty.text = @"No HAR entries yet";
     harEmpty.textColor = [UIColor colorWithRed:0.35 green:0.35 blue:0.40 alpha:1.0];
     harEmpty.font = [UIFont systemFontOfSize:13];
@@ -661,7 +689,7 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
     harEmpty.tag = 999;
     [self.harScrollView addSubview:harEmpty];
 
-    self.harScrollView.contentSize = CGSizeMake(windowW, contentH);
+    self.harScrollView.contentSize = CGSizeMake(windowW, harScrollH);
 
     // ---- Footer (44px) ----
     CGFloat footerY = windowH - footerH;
@@ -1285,6 +1313,8 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
             self.harExportBtn.hidden = YES;
             UIView *harClear = [self.footerView viewWithTag:888];
             harClear.hidden = YES;
+            self.harSearchField.hidden = YES;
+            [self.harSearchField resignFirstResponder];
         } else {
             // HAR tab
             self.fieldsScrollView.hidden = YES;
@@ -1302,10 +1332,19 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
             self.harExportBtn.hidden = NO;
             UIView *harClear = [self.footerView viewWithTag:888];
             harClear.hidden = NO;
+            self.harSearchField.hidden = NO;
             // Refresh HAR list
             [self refreshHarList];
         }
     });
+}
+
+- (void)harSearchChanged:(UITextField *)field {
+    self.harSearchQuery = field.text ?: @"";
+    if (self.harSearchQuery.length == 0) {
+        self.harSearchQuery = nil;
+    }
+    [self refreshHarList];
 }
 
 - (void)refreshHarList {
@@ -1337,6 +1376,11 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
         CGFloat cardW = self.harScrollView.bounds.size.width - sidePad * 2;
         CGFloat cardSpacing = 4;
 
+        // 搜索过滤
+        NSString *searchQuery = self.harSearchQuery;
+        BOOL hasSearch = (searchQuery && searchQuery.length > 0);
+        NSInteger displayIndex = 0;
+
         // 已配对的 HAR entries
         for (NSInteger i = 0; i < (NSInteger)self.harEntries.count; i++) {
             NSDictionary *entry = self.harEntries[i];
@@ -1354,6 +1398,17 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
             if (resp[@"content"][@"text"]) {
                 respStr = resp[@"content"][@"text"];
             }
+
+            // 搜索过滤
+            if (hasSearch) {
+                NSRange apiRange = [apiName rangeOfString:searchQuery options:NSCaseInsensitiveSearch];
+                NSRange urlRange = [url rangeOfString:searchQuery options:NSCaseInsensitiveSearch];
+                if (apiRange.location == NSNotFound && urlRange.location == NSNotFound) {
+                    continue; // 不匹配，跳过
+                }
+            }
+            NSInteger i = displayIndex;
+            displayIndex++;
 
             // 截断显示
             NSString *urlShort = url;
@@ -1441,12 +1496,21 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
         }
 
         // Pending requests (未配对)
-        NSInteger pendingIdx = (NSInteger)self.harEntries.count;
+        NSInteger pendingIdx = displayIndex;
         for (NSDictionary *req in self.pendingRequests) {
             NSString *apiName = req[@"_api"] ?: @"unknown";
             NSString *method = req[@"method"] ?: @"?";
             NSString *url = req[@"url"] ?: @"-";
             NSString *bodyStr = req[@"body"] ?: @"";
+
+            // 搜索过滤
+            if (hasSearch) {
+                NSRange apiRange = [apiName rangeOfString:searchQuery options:NSCaseInsensitiveSearch];
+                NSRange urlRange = [url rangeOfString:searchQuery options:NSCaseInsensitiveSearch];
+                if (apiRange.location == NSNotFound && urlRange.location == NSNotFound) {
+                    continue;
+                }
+            }
 
             NSString *urlShort = url;
             if (urlShort.length > 50) {
@@ -2306,6 +2370,250 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
 %end
 
 // ============================================================================
+// MARK: - HTTP Server (MCP-style endpoint for computer queries)
+// ============================================================================
+
+@interface MCPHTTPServer : NSObject <NSURLSessionDelegate>
+@property (nonatomic, strong) NSURLSession *serverSession;
++ (instancetype)sharedInstance;
+- (void)start;
+@end
+
+@implementation MCPHTTPServer
+
++ (instancetype)sharedInstance {
+    static MCPHTTPServer *instance = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        instance = [[MCPHTTPServer alloc] init];
+    });
+    return instance;
+}
+
+- (NSString *)buildJSONResponseForPath:(NSString *)path query:(NSString *)query {
+    FloatWindowManager *mgr = [FloatWindowManager sharedInstance];
+
+    if ([path isEqualToString:@"/status"]) {
+        // 返回 tweak 状态
+        NSDictionary *status = @{
+            @"captureCount": @(mgr.captureCount),
+            @"harCount": @(mgr.harEntries.count),
+            @"pendingCount": @(mgr.pendingRequests.count),
+            @"lastAPI": mgr.lastAPI ?: @"-",
+            @"lastURL": mgr.lastURL ?: @"-",
+            @"lastCookie": mgr.lastCookie ?: @"-",
+            @"lastSource": mgr.lastSource ?: @"-",
+            @"lastUpdate": mgr.lastUpdate ? [mgr.lastUpdate description] : @"-"
+        };
+        NSDictionary *fields = mgr.fieldValues;
+        NSMutableDictionary *fieldData = [NSMutableDictionary dictionary];
+        for (NSString *key in fields) {
+            fieldData[key] = @{
+                @"value": fields[key] ?: @"-",
+                @"source": mgr.fieldSources[key] ?: @"-"
+            };
+        }
+        return [self dictToJSON:@{@"status": status, @"fields": fieldData}];
+    }
+
+    if ([path isEqualToString:@"/har"]) {
+        // 返回所有 HAR 条目
+        NSMutableArray *cleanEntries = [NSMutableArray array];
+        for (NSDictionary *e in mgr.harEntries) {
+            NSMutableDictionary *clean = [e mutableCopy];
+            [clean removeObjectForKey:@"_api"];
+            [cleanEntries addObject:clean];
+        }
+        return [self dictToJSON:@{
+            @"total": @(cleanEntries.count),
+            @"entries": cleanEntries
+        }];
+    }
+
+    if ([path isEqualToString:@"/har/search"]) {
+        // 搜索 HAR 条目 ?q=keyword
+        NSString *keyword = @"";
+        if (query) {
+            NSDictionary *params = [self parseQueryString:query];
+            keyword = params[@"q"] ?: @"";
+        }
+        NSMutableArray *results = [NSMutableArray array];
+        for (NSDictionary *e in mgr.harEntries) {
+            NSString *api = e[@"_api"] ?: @"";
+            NSDictionary *req = e[@"request"];
+            NSString *url = req[@"url"] ?: @"";
+            if (keyword.length == 0 ||
+                [api rangeOfString:keyword options:NSCaseInsensitiveSearch].location != NSNotFound ||
+                [url rangeOfString:keyword options:NSCaseInsensitiveSearch].location != NSNotFound) {
+                NSMutableDictionary *clean = [e mutableCopy];
+                [clean removeObjectForKey:@"_api"];
+                [results addObject:clean];
+            }
+        }
+        return [self dictToJSON:@{
+            @"query": keyword,
+            @"total": @(results.count),
+            @"entries": results
+        }];
+    }
+
+    if ([path hasPrefix:@"/har/"]) {
+        // 获取单条 HAR ?index=N
+        NSString *idxStr = [path substringFromIndex:5];
+        NSInteger idx = [idxStr integerValue];
+        if (idx >= 0 && idx < (NSInteger)mgr.harEntries.count) {
+            NSMutableDictionary *clean = [mgr.harEntries[idx] mutableCopy];
+            [clean removeObjectForKey:@"_api"];
+            return [self dictToJSON:clean];
+        }
+        return [self dictToJSON:@{@"error": @"Index out of range"}];
+    }
+
+    if ([path isEqualToString:@"/fields"]) {
+        // 返回所有字段值
+        NSMutableDictionary *fieldData = [NSMutableDictionary dictionary];
+        for (NSString *key in mgr.fieldValues) {
+            fieldData[key] = @{
+                @"value": mgr.fieldValues[key] ?: @"-",
+                @"source": mgr.fieldSources[key] ?: @"-"
+            };
+        }
+        return [self dictToJSON:fieldData];
+    }
+
+    if ([path isEqualToString:@"/clear"]) {
+        // 清除所有数据
+        [mgr clearAll];
+        [mgr clearHar];
+        return [self dictToJSON:@{@"result": @"ok", @"message": @"All data cleared"}];
+    }
+
+    // 默认: 返回 API 帮助
+    return [self dictToJSON:@{
+        @"name": @"ElemeFieldMonitor MCP Server",
+        @"endpoints": @[
+            @{@"path": @"/status", @"desc": @"Get tweak status and field values"},
+            @{@"path": @"/har", @"desc": @"Get all HAR entries"},
+            @{@"path": @"/har/search?q=keyword", @"desc": @"Search HAR entries by API name or URL"},
+            @{@"path": @"/har/{index}", @"desc": @"Get single HAR entry by index"},
+            @{@"path": @"/fields", @"desc": @"Get all captured field values"},
+            @{@"path": @"/clear", @"desc": @"Clear all captured data"}
+        ]
+    }];
+}
+
+- (NSDictionary *)parseQueryString:(NSString *)query {
+    NSMutableDictionary *params = [NSMutableDictionary dictionary];
+    NSArray *pairs = [query componentsSeparatedByString:@"&"];
+    for (NSString *pair in pairs) {
+        NSArray *kv = [pair componentsSeparatedByString:@"="];
+        if (kv.count == 2) {
+            NSString *key = [kv[0] stringByRemovingPercentEncoding] ?: kv[0];
+            NSString *val = [kv[1] stringByRemovingPercentEncoding] ?: kv[1];
+            params[key] = val;
+        }
+    }
+    return params;
+}
+
+- (NSString *)dictToJSON:(NSDictionary *)dict {
+    NSError *err = nil;
+    NSData *data = [NSJSONSerialization dataWithJSONObject:dict options:NSJSONWritingPrettyPrinted error:&err];
+    if (err || !data) return @"{\"error\":\"JSON encoding failed\"}";
+    return [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] ?: @"{\"error\":\"encoding failed\"}";
+}
+
+- (void)start {
+    // 使用 GCDHTTPServer 风格: 直接用 socket 监听
+    // 由于 tweak 环境没有 GCDHTTPServer，使用轻量 socket 实现
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_BACKGROUND, 0), ^{
+        int serverFd = socket(AF_INET, SOCK_STREAM, 0);
+        if (serverFd < 0) {
+            NSLog(@"[ElemeFieldMonitor] MCP HTTP Server: socket() failed");
+            return;
+        }
+
+        int reuse = 1;
+        setsockopt(serverFd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+
+        struct sockaddr_in addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = INADDR_ANY;
+        addr.sin_port = htons(9876);
+
+        if (bind(serverFd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+            NSLog(@"[ElemeFieldMonitor] MCP HTTP Server: bind() failed on port 9876");
+            close(serverFd);
+            return;
+        }
+
+        if (listen(serverFd, 5) < 0) {
+            NSLog(@"[ElemeFieldMonitor] MCP HTTP Server: listen() failed");
+            close(serverFd);
+            return;
+        }
+
+        NSLog(@"[ElemeFieldMonitor] MCP HTTP Server listening on port 9876");
+
+        while (YES) {
+            struct sockaddr_in clientAddr;
+            socklen_t clientLen = sizeof(clientAddr);
+            int clientFd = accept(serverFd, (struct sockaddr *)&clientAddr, &clientLen);
+            if (clientFd < 0) continue;
+
+            // 读取请求 (简单读取一行)
+            char buf[4096];
+            ssize_t n = read(clientFd, buf, sizeof(buf) - 1);
+            if (n <= 0) {
+                close(clientFd);
+                continue;
+            }
+            buf[n] = '\0';
+
+            // 解析 HTTP 请求行: GET /path?query HTTP/1.1
+            NSString *requestStr = [NSString stringWithUTF8String:buf];
+            NSString *path = @"/";
+            NSString *query = @"";
+            NSRange firstLineEnd = [requestStr rangeOfString:@"\r\n"];
+            if (firstLineEnd.location != NSNotFound) {
+                NSString *firstLine = [requestStr substringToIndex:firstLineEnd.location];
+                NSArray *parts = [firstLine componentsSeparatedByString:@" "];
+                if (parts.count >= 2) {
+                    NSString *fullPath = parts[1];
+                    NSRange qRange = [fullPath rangeOfString:@"?"];
+                    if (qRange.location != NSNotFound) {
+                        path = [fullPath substringToIndex:qRange.location];
+                        query = [fullPath substringFromIndex:qRange.location + 1];
+                    } else {
+                        path = fullPath;
+                    }
+                }
+            }
+
+            // 构建响应
+            NSString *jsonBody = [self buildJSONResponseForPath:path query:query];
+            NSData *respData = [jsonBody dataUsingEncoding:NSUTF8StringEncoding];
+
+            NSString *header = [NSString stringWithFormat:
+                @"HTTP/1.1 200 OK\r\n"
+                @"Content-Type: application/json; charset=utf-8\r\n"
+                @"Content-Length: %lu\r\n"
+                @"Access-Control-Allow-Origin: *\r\n"
+                @"Connection: close\r\n"
+                @"\r\n", (unsigned long)respData.length];
+
+            NSData *headerData = [header dataUsingEncoding:NSUTF8StringEncoding];
+            write(clientFd, headerData.bytes, headerData.length);
+            write(clientFd, respData.bytes, respData.length);
+            close(clientFd);
+        }
+    });
+}
+
+@end
+
+// ============================================================================
 // MARK: - 构造函数
 // ============================================================================
 
@@ -2317,6 +2625,9 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
 
     // 初始化悬浮窗管理器 (触发 dispatch_once 创建实例)
     [FloatWindowManager sharedInstance];
+
+    // 启动 MCP HTTP Server (端口 9876)
+    [[MCPHTTPServer sharedInstance] start];
 
     // 延迟显示悬浮窗，确保 UI 已就绪
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)),
