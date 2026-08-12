@@ -81,6 +81,8 @@ static NSString *extractAPIFromURL(NSURL *url) {
 static NSString *g_lastURL = nil;
 static NSString *g_lastMethod = nil;
 static NSDictionary *g_lastHeaders = nil;
+static NSInteger g_lastStatusCode = 0;
+static NSString *g_lastResponseAPI = nil;
 
 // captureRequestIfNeeded 函数声明在 FloatWindowManager 接口之后
 
@@ -1126,16 +1128,49 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
             }
         }
         
-        // 如果没有匹配的 pending request，创建一个仅含响应的条目
+        // 如果没有匹配的 pending request，检查是否已有同 API 的 HAR 条目（避免重复）
         if (!pendingReq) {
+            // 检查是否已有该 API 的条目（URLSession hook 可能已记录）
+            BOOL foundExisting = NO;
+            for (NSInteger i = (NSInteger)self.harEntries.count - 1; i >= 0; i--) {
+                NSDictionary *existing = self.harEntries[i];
+                if ([existing[@"_api"] isEqualToString:api]) {
+                    // 已有条目，如果已有非零 status 则跳过，否则更新 status
+                    NSDictionary *existingResp = existing[@"response"];
+                    NSInteger existingStatus = [existingResp[@"status"] integerValue];
+                    if (existingStatus > 0) {
+                        // 已有正确 status，跳过不创建重复
+                        NSLog(@"[ElemeFieldMonitor] Response duplicate skipped: %@ (existing status: %ld)", api, (long)existingStatus);
+                        return;
+                    } else if (code > 0) {
+                        // 更新现有条目的 status
+                        NSMutableDictionary *mutableEntry = [existing mutableCopy];
+                        NSMutableDictionary *mutableResp = [existingResp mutableCopy];
+                        mutableResp[@"status"] = @(code);
+                        mutableResp[@"statusText"] = @"OK";
+                        mutableEntry[@"response"] = mutableResp;
+                        [self.harEntries replaceObjectAtIndex:i withObject:mutableEntry];
+                        NSLog(@"[ElemeFieldMonitor] Updated existing entry status: %@ -> %ld", api, (long)code);
+                        foundExisting = YES;
+                    }
+                    break;
+                }
+            }
+            if (foundExisting) return;
+            
+            // 确实没有匹配，创建 response-only 条目，使用当前时间戳
             NSLog(@"[ElemeFieldMonitor] Response without pending request: %@ (creating response-only entry)", api);
+            NSDateFormatter *nowFmt = [[NSDateFormatter alloc] init];
+            nowFmt.dateFormat = @"yyyy-MM-dd'T'HH:mm:ss.SSS'Z'";
+            nowFmt.timeZone = [NSTimeZone timeZoneWithAbbreviation:@"UTC"];
+            nowFmt.locale = [[NSLocale alloc] initWithLocaleIdentifier:@"en_US_POSIX"];
             pendingReq = @{
                 @"_api": api,
-                @"url": @"-",
-                @"method": @"?",
-                @"headers": @{},
+                @"url": g_lastURL ?: @"-",
+                @"method": g_lastMethod ?: @"?",
+                @"headers": g_lastHeaders ?: @{},
                 @"body": @"",
-                @"_timestamp": @"1970-01-01T00:00:00.000Z"
+                @"_timestamp": [nowFmt stringFromDate:[NSDate date]]
             };
         }
         
@@ -1877,17 +1912,17 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
                                                                      body:rawStr];
                     NSLog(@"[ElemeFieldMonitor] Target API request (envelope) captured: %@", api);
                 } else if (isResponse) {
-                    // MTOP 响应
+                    // MTOP 响应（使用 g_lastStatusCode 供 JSON hook 获取状态码）
                     [[FloatWindowManager sharedInstance] recordAPIResponse:api
                                                                    response:rawStr
-                                                                  statusCode:0];
-                    NSLog(@"[ElemeFieldMonitor] Target API response (JSON) captured: %@", api);
+                                                                  statusCode:g_lastStatusCode];
+                    NSLog(@"[ElemeFieldMonitor] Target API response (JSON) captured: %@ (status: %ld)", api, (long)g_lastStatusCode);
                 } else {
                     // 未知类型，默认当响应
                     [[FloatWindowManager sharedInstance] recordAPIResponse:api
                                                                    response:rawStr
-                                                                  statusCode:0];
-                    NSLog(@"[ElemeFieldMonitor] Target API unknown (JSON) captured: %@", api);
+                                                                  statusCode:g_lastStatusCode];
+                    NSLog(@"[ElemeFieldMonitor] Target API unknown (JSON) captured: %@ (status: %ld)", api, (long)g_lastStatusCode);
                 }
             }
         } @catch (NSException *e) {
@@ -2057,10 +2092,13 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
                     if ([response isKindOfClass:[NSHTTPURLResponse class]]) {
                         statusCode = ((NSHTTPURLResponse *)response).statusCode;
                     }
+                    // 缓存状态码和 API 名，供 JSON hook 使用
+                    g_lastStatusCode = statusCode;
+                    g_lastResponseAPI = [effectiveAPI copy];
                     [[FloatWindowManager sharedInstance] recordAPIResponse:effectiveAPI
                                                                    response:respStr
                                                                   statusCode:statusCode];
-                    NSLog(@"[ElemeFieldMonitor] API response captured: %@", effectiveAPI);
+                    NSLog(@"[ElemeFieldMonitor] API response captured: %@ (status: %ld)", effectiveAPI, (long)statusCode);
                 }
             } @catch (NSException *e) {}
         }
