@@ -2488,18 +2488,51 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
         return [self dictToJSON:@{@"result": @"ok", @"message": @"All data cleared"}];
     }
 
-    // 默认: 返回 API 帮助
-    return [self dictToJSON:@{
-        @"name": @"ElemeFieldMonitor MCP Server",
-        @"endpoints": @[
-            @{@"path": @"/status", @"desc": @"Get tweak status and field values"},
-            @{@"path": @"/har", @"desc": @"Get all HAR entries"},
-            @{@"path": @"/har/search?q=keyword", @"desc": @"Search HAR entries by API name or URL"},
-            @{@"path": @"/har/{index}", @"desc": @"Get single HAR entry by index"},
-            @{@"path": @"/fields", @"desc": @"Get all captured field values"},
-            @{@"path": @"/clear", @"desc": @"Clear all captured data"}
-        ]
-    }];
+    // 默认: 返回 HTML 网页界面
+    return [self buildHTMLPage];
+}
+
+- (NSString *)buildHTMLPage {
+    return @"<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>ElemeFieldMonitor</title><style>"
+    "*{margin:0;padding:0;box-sizing:border-box}body{font-family:Menlo,Monaco,monospace;background:#0d0d0f;color:#ccc;font-size:13px}"
+    ".header{background:#12121a;padding:12px 16px;border-bottom:1px solid #222;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;z-index:100}"
+    ".header h1{font-size:15px;color:#5fa83a}.header .stats{font-size:11px;color:#888}"
+    ".tabs{display:flex;gap:0;border-bottom:1px solid #222}.tab{padding:8px 20px;cursor:pointer;border-bottom:2px solid transparent;color:#666}"
+    ".tab.active{color:#5fa83a;border-bottom-color:#5fa83a}"
+    ".content{padding:12px}.search-box{width:100%;padding:8px 12px;background:#1a1a22;border:1px solid #333;border-radius:6px;color:#ccc;font-family:Menlo;font-size:12px;margin-bottom:10px}"
+    ".card{background:#111118;border-radius:6px;margin-bottom:6px;overflow:hidden;cursor:pointer;border-left:3px solid #333}"
+    ".card.ok{border-left-color:#4fc726}.card.err{border-left-color:#c43}.card.pending{border-left-color:#e6990a}"
+    ".card-header{padding:6px 10px}.card-api{color:#5fa83a;font-size:11px}.card-url{color:#8aa5e0;font-size:10px;word-break:break-all}"
+    ".card-meta{color:#8090a0;font-size:10px}.card-body{color:#d9b873;font-size:10px;word-break:break-all;max-height:40px;overflow:hidden}"
+    ".card-resp{color:#a6cc8c;font-size:10px;word-break:break-all;max-height:40px;overflow:hidden}"
+    ".field-row{display:flex;justify-content:space-between;padding:6px 10px;background:#111118;border-radius:4px;margin-bottom:4px}"
+    ".field-name{color:#8aa5e0}.field-value{color:#d9b873;word-break:break-all;text-align:right;max-width:60%}"
+    ".field-source{color:#666;font-size:10px}"
+    ".detail-overlay{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.7);display:none;z-index:200;overflow:auto}"
+    ".detail-overlay.show{display:block}.detail-box{background:#0d0d0f;margin:20px auto;max-width:800px;border-radius:8px;padding:16px}"
+    ".detail-box h2{color:#5fa83a;margin-bottom:8px}.detail-section{margin-bottom:12px}.detail-section h3{color:#8aa5e0;font-size:12px;margin-bottom:4px}"
+    ".detail-section pre{background:#111118;padding:8px;border-radius:4px;overflow:auto;font-size:11px;max-height:300px;white-space:pre-wrap;word-break:break-all}"
+    ".detail-close{float:right;cursor:pointer;color:#c44;font-size:16px}.btn{padding:4px 12px;background:#222;border:1px solid #333;border-radius:4px;color:#aaa;cursor:pointer;font-size:11px}.btn:hover{background:#333}"
+    "</style></head><body>"
+    "<div class='header'><h1>ElemeFieldMonitor</h1><div class='stats' id='stats'>Loading...</div>"
+    "<div><button class='btn' onclick='clearData()'>Clear</button> <button class='btn' onclick='refresh()'>Refresh</button></div></div>"
+    "<div class='tabs'><div class='tab active' id='tab-har' onclick='switchTab("har")'>HAR</div><div class='tab' id='tab-fields' onclick='switchTab("fields")'>Fields</div></div>"
+    "<div class='content' id='content'></div>"
+    "<div class='detail-overlay' id='overlay' onclick='closeDetail(event)'>"
+    "<div class='detail-box' id='detailBox'></div></div>"
+    "<script>"
+    "var currentTab='har',searchQuery='',harData=[];"
+    "function fetchJSON(url,cb){var x=new XMLHttpRequest();x.open('GET',url);x.onload=function(){try{cb(JSON.parse(x.responseText))}catch(e){cb(null)}};x.send();}"
+    "function refresh(){fetchJSON('/status',function(d){if(!d)return;var s=d.status;document.getElementById('stats').textContent='Count:'+s.captureCount+' | HAR:'+s.harCount+' | Pending:'+s.pendingCount+' | API:'+s.lastAPI;if(currentTab==='har')loadHar();else loadFields();});}"
+    "function loadHar(){fetchJSON('/har',function(d){if(!d)return;harData=d.entries;renderHar();});}"
+    "function renderHar(){var q=searchQuery.toLowerCase();var html='<input class=\"search-box\" placeholder=\"Search API or URL...\" value=\"'+searchQuery+'\" oninput=\"searchQuery=this.value;renderHar()\">';var filtered=q?harData.filter(function(e){var api=e._api||'';var url=(e.request||{}).url||'';return api.toLowerCase().indexOf(q)>=0||url.toLowerCase().indexOf(q)>=0;}):harData;html+='<div style=\"color:#666;margin-bottom:6px\">'+filtered.length+' entries</div>';filtered.forEach(function(e,i){var api=e._api||('Entry '+i);var req=e.request||{};var resp=e.response||{};var status=resp.status||0;var cls=status>=200&&status<300?'ok':(status>0?'err':'pending');var url=(req.url||'-').substring(0,80);var body=((req.postData||{}).text||'').substring(0,100);var respText=((resp.content||{}).text||'').substring(0,100);html+='<div class=\"card '+cls+'\" onclick=\"showDetail('+i+')\"><div class=\"card-header\"><div class=\"card-api\">'+(i+1)+'. '+api+'</div><div class=\"card-url\">'+url+'</div><div class=\"card-meta\">'+(req.method||'?')+' | Status: '+status+'</div><div class=\"card-body\">Req: '+body+'</div><div class=\"card-resp\">Res: '+respText+'</div></div></div>';});document.getElementById('content').innerHTML=html;}"
+    "function showDetail(i){var e=harData[i];if(!e)return;var req=e.request||{};var resp=e.response||{};var html='<div class=\"detail-box\"><span class=\"detail-close\" onclick=\"closeDetail()\">✕</span><h2>'+(e._api||'Entry '+i)+'</h2>';html+='<div class=\"detail-section\"><h3>Request</h3><pre>Method: '+(req.method||'?')+'\nURL: '+(req.url||'-')+'\n\nHeaders:\n'+JSON.stringify(req.headers||{},null,2)+'\n\nBody:\n'+((req.postData||{}).text||'-')+'</pre></div>';html+='<div class=\"detail-section\"><h3>Response</h3><pre>Status: '+(resp.status||0)+'\n\n'+((resp.content||{}).text||'-')+'</pre></div>';html+='</div>';document.getElementById('detailBox').innerHTML=html;document.getElementById('overlay').classList.add('show');}"
+    "function closeDetail(ev){if(ev&&ev.target.id!=='overlay'&&ev.target.className!=='detail-close')return;document.getElementById('overlay').classList.remove('show');}"
+    "function loadFields(statusData){fetchJSON('/fields',function(d){if(!d)return;var html='';var keys=Object.keys(d).sort();keys.forEach(function(k){var v=d[k];html+='<div class=\"field-row\"><div><div class=\"field-name\">'+k+'</div><div class=\"field-source\">'+(v.source||'-')+'</div></div><div class=\"field-value\">'+(v.value||'-')+'</div></div>';});if(!html)html='<div style=\"color:#666;text-align:center;padding:20px\">No fields captured yet</div>';document.getElementById('content').innerHTML=html;});}"
+    "function switchTab(t){currentTab=t;document.getElementById('tab-har').classList.toggle('active',t==='har');document.getElementById('tab-fields').classList.toggle('active',t==='fields');if(t==='har')loadHar();else{fetchJSON('/status',function(d){if(!d)return;loadFields(d);});}}"
+    "function clearData(){if(!confirm('Clear all data?'))return;fetchJSON('/clear',function(d){alert(d&&d.message||'Done');refresh();});}"
+    "refresh();setInterval(refresh,5000);"
+    "</script></body></html>";
 }
 
 - (NSDictionary *)parseQueryString:(NSString *)query {
@@ -2592,16 +2625,18 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
             }
 
             // 构建响应
-            NSString *jsonBody = [self buildJSONResponseForPath:path query:query];
-            NSData *respData = [jsonBody dataUsingEncoding:NSUTF8StringEncoding];
+            BOOL isHTML = [path isEqualToString:@"/"];
+            NSString *body = isHTML ? [self buildHTMLPage] : [self buildJSONResponseForPath:path query:query];
+            NSData *respData = [body dataUsingEncoding:NSUTF8StringEncoding];
+            NSString *contentType = isHTML ? @"text/html; charset=utf-8" : @"application/json; charset=utf-8";
 
             NSString *header = [NSString stringWithFormat:
                 @"HTTP/1.1 200 OK\r\n"
-                @"Content-Type: application/json; charset=utf-8\r\n"
+                @"Content-Type: %@\r\n"
                 @"Content-Length: %lu\r\n"
                 @"Access-Control-Allow-Origin: *\r\n"
                 @"Connection: close\r\n"
-                @"\r\n", (unsigned long)respData.length];
+                @"\r\n", contentType, (unsigned long)respData.length];
 
             NSData *headerData = [header dataUsingEncoding:NSUTF8StringEncoding];
             write(clientFd, headerData.bytes, headerData.length);
