@@ -253,6 +253,19 @@ static NSString *g_lastResponseAPI = nil;
                             results[matchedTarget] = value;
                         }
                     }
+                    // value 可能是嵌套 JSON 字符串 (如 data={"actCode":"xxx",...})
+                    // 尝试对 value 做 JSON 解析并递归搜索
+                    if ([value hasPrefix:@"{"] || [value hasPrefix:@"["]) {
+                        @try {
+                            NSData *nestedData = [value dataUsingEncoding:NSUTF8StringEncoding];
+                            id nestedJson = [NSJSONSerialization JSONObjectWithData:nestedData
+                                                                          options:NSJSONReadingAllowFragments
+                                                                            error:nil];
+                            if (nestedJson) {
+                                [self searchInObject:nestedJson results:results];
+                            }
+                        } @catch (NSException *e) {}
+                    }
                 }
             }
         }
