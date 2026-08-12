@@ -238,23 +238,32 @@ static NSString *g_lastResponseAPI = nil;
         // 也尝试在纯文本中搜索字段名 (如 "encryptSceneCode":"xxx" 或 encryptSceneCode=xxx)
         for (NSString *target in kTargetKeys()) {
             if (results[target]) continue; // 已找到就跳过
-            // 搜索 "key":"value" 模式
-            NSString *pattern1 = [NSString stringWithFormat:@"\"%@\"\s*:\s*\"([^\"]+)\"", target];
-            NSRegularExpression *regex1 = [NSRegularExpression regularExpressionWithPattern:pattern1 options:NSRegularExpressionCaseInsensitive error:nil];
-            NSTextCheckingResult *match1 = [regex1 firstMatchInString:bodyStr options:0 range:NSMakeRange(0, bodyStr.length)];
-            if (match1 && match1.numberOfRanges > 1) {
-                NSString *val = [bodyStr substringWithRange:[match1 rangeAtIndex:1]];
-                if ([self isValidValue:val]) {
-                    results[target] = val;
-                    continue;
+            // 搜索 "key":"value" 模式 - 用简单字符串搜索避免转义问题
+            NSString *quote = [NSString stringWithFormat:@"\"%@\":\"", target];
+            NSRange qRange = [bodyStr rangeOfString:quote options:NSCaseInsensitiveSearch];
+            if (qRange.location != NSNotFound) {
+                NSUInteger valStart = qRange.location + qRange.length;
+                NSRange endQuote = [bodyStr rangeOfString:@"\"" options:0 range:NSMakeRange(valStart, bodyStr.length - valStart)];
+                if (endQuote.location != NSNotFound) {
+                    NSString *val = [bodyStr substringWithRange:NSMakeRange(valStart, endQuote.location - valStart)];
+                    if ([self isValidValue:val]) {
+                        results[target] = val;
+                        continue;
+                    }
                 }
             }
-            // 搜索 key=value 模式
-            NSString *pattern2 = [NSString stringWithFormat:@"%@=([^&\"\s]+)", target];
-            NSRegularExpression *regex2 = [NSRegularExpression regularExpressionWithPattern:pattern2 options:NSRegularExpressionCaseInsensitive error:nil];
-            NSTextCheckingResult *match2 = [regex2 firstMatchInString:bodyStr options:0 range:NSMakeRange(0, bodyStr.length)];
-            if (match2 && match2.numberOfRanges > 1) {
-                NSString *val = [bodyStr substringWithRange:[match2 rangeAtIndex:1]];
+            // 搜索 key=value 模式 (form-encoded 或 URL 参数)
+            NSString *eq = [NSString stringWithFormat:@"%@=", target];
+            NSRange eqRange = [bodyStr rangeOfString:eq options:NSCaseInsensitiveSearch];
+            if (eqRange.location != NSNotFound) {
+                NSUInteger valStart = eqRange.location + eqRange.length;
+                // 找到值结束位置 (& 或换行 或 结尾)
+                NSUInteger valEnd = bodyStr.length;
+                NSRange ampRange = [bodyStr rangeOfString:@"&" options:0 range:NSMakeRange(valStart, bodyStr.length - valStart)];
+                if (ampRange.location != NSNotFound) valEnd = ampRange.location;
+                NSRange nlRange = [bodyStr rangeOfString:@"\n" options:0 range:NSMakeRange(valStart, bodyStr.length - valStart)];
+                if (nlRange.location != NSNotFound && nlRange.location < valEnd) valEnd = nlRange.location;
+                NSString *val = [bodyStr substringWithRange:NSMakeRange(valStart, valEnd - valStart)];
                 val = [val stringByRemovingPercentEncoding];
                 if ([self isValidValue:val]) {
                     results[target] = val;
