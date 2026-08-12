@@ -116,7 +116,7 @@ static NSString *g_lastResponseAPI = nil;
     if ([str hasPrefix:@"@path."]) return NO;
     if ([str hasPrefix:@"${"]) return NO;
     // 过滤过于短的值 (单字符如 "new" "all" 对 sceneCode 无意义)
-    if (str.length < 2) return NO;
+    // 但 rightId/actCode 可能是短数字，所以只过滤空和模板
     return YES;
 }
 
@@ -125,14 +125,26 @@ static NSString *g_lastResponseAPI = nil;
 
     if ([obj isKindOfClass:[NSDictionary class]]) {
         NSDictionary *dict = (NSDictionary *)obj;
-        for (NSString *key in kTargetKeys()) {
-            id value = dict[key];
-            if (value && ![value isKindOfClass:[NSNull class]]) {
-                NSString *strValue = [NSString stringWithFormat:@"%@", value];
-                if ([self isValidValue:strValue]) {
-                    // 不覆盖已找到的真实值
-                    if (!results[key]) {
-                        results[key] = strValue;
+        for (NSString *key in dict.allKeys) {
+            if (![key isKindOfClass:[NSString class]]) continue;
+            // 大小写不敏感匹配目标字段
+            NSString *lowerKey = [key lowercaseString];
+            NSString *matchedTarget = nil;
+            for (NSString *target in kTargetKeys()) {
+                if ([lowerKey isEqualToString:[target lowercaseString]]) {
+                    matchedTarget = target;
+                    break;
+                }
+            }
+            if (matchedTarget) {
+                id value = dict[key];
+                if (value && ![value isKindOfClass:[NSNull class]]) {
+                    NSString *strValue = [NSString stringWithFormat:@"%@", value];
+                    if ([self isValidValue:strValue]) {
+                        // 不覆盖已找到的真实值
+                        if (!results[matchedTarget]) {
+                            results[matchedTarget] = strValue;
+                        }
                     }
                 }
             }
@@ -161,9 +173,18 @@ static NSString *g_lastResponseAPI = nil;
             NSString *value = [[kv subarrayWithRange:NSMakeRange(1, kv.count - 1)]
                 componentsJoinedByString:@"="];
             value = [value stringByRemovingPercentEncoding];
-            if ([kTargetKeys() containsObject:key] && [self isValidValue:value]) {
-                if (!results[key]) {
-                    results[key] = value;
+            // 大小写不敏感匹配
+            NSString *lowerKey = [key lowercaseString];
+            NSString *matchedTarget = nil;
+            for (NSString *target in kTargetKeys()) {
+                if ([lowerKey isEqualToString:[target lowercaseString]]) {
+                    matchedTarget = target;
+                    break;
+                }
+            }
+            if (matchedTarget && [self isValidValue:value]) {
+                if (!results[matchedTarget]) {
+                    results[matchedTarget] = value;
                 }
             }
         }
@@ -196,11 +217,14 @@ static NSString *g_lastResponseAPI = nil;
 @property (nonatomic, strong) UIView *tabBarView;
 @property (nonatomic, strong) UIScrollView *fieldsScrollView;
 @property (nonatomic, strong) UIScrollView *harScrollView;
+@property (nonatomic, strong) UIScrollView *mcpScrollView;
 @property (nonatomic, strong) UIButton *tabFieldsBtn;
 @property (nonatomic, strong) UIButton *tabHarBtn;
+@property (nonatomic, strong) UIButton *tabMcpBtn;
 @property (nonatomic, strong) UIView *tabFieldsIndicator;
 @property (nonatomic, strong) UIView *tabHarIndicator;
-@property (nonatomic, assign) NSInteger activeTab; // 0=fields, 1=har
+@property (nonatomic, strong) UIView *tabMcpIndicator;
+@property (nonatomic, assign) NSInteger activeTab; // 0=fields, 1=har, 2=mcp
 @property (nonatomic, strong) UIView *detailOverlayView;
 
 @property (nonatomic, strong) UILabel *titleLabel;
@@ -249,6 +273,7 @@ static NSString *g_lastResponseAPI = nil;
 - (void)refreshHarList;
 - (void)tabFieldsTapped;
 - (void)tabHarTapped;
+- (void)tabMcpTapped;
 - (void)clearHar;
 - (void)showHarDetail:(NSDictionary *)entry;
 - (void)dismissHarDetail;
@@ -447,7 +472,7 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
     tabDivider.backgroundColor = dividerColor;
     [self.tabBarView addSubview:tabDivider];
 
-    CGFloat tabW = windowW / 2;
+    CGFloat tabW = windowW / 3;
     self.tabFieldsBtn = [UIButton buttonWithType:UIButtonTypeSystem];
     self.tabFieldsBtn.frame = CGRectMake(0, 0, tabW, tabH);
     [self.tabFieldsBtn setTitle:@"Fields" forState:UIControlStateNormal];
@@ -464,6 +489,14 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
     [self.tabHarBtn addTarget:self action:@selector(tabHarTapped) forControlEvents:UIControlEventTouchUpInside];
     [self.tabBarView addSubview:self.tabHarBtn];
 
+    self.tabMcpBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    self.tabMcpBtn.frame = CGRectMake(tabW * 2, 0, tabW, tabH);
+    [self.tabMcpBtn setTitle:@"MCP" forState:UIControlStateNormal];
+    [self.tabMcpBtn setTitleColor:tabInactiveColor forState:UIControlStateNormal];
+    self.tabMcpBtn.titleLabel.font = [UIFont boldSystemFontOfSize:12];
+    [self.tabMcpBtn addTarget:self action:@selector(tabMcpTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.tabBarView addSubview:self.tabMcpBtn];
+
     // Tab indicators (底部色条)
     self.tabFieldsIndicator = [[UIView alloc] initWithFrame:CGRectMake(tabW / 2 - 20, tabH - 3, 40, 3)];
     self.tabFieldsIndicator.backgroundColor = tabActiveColor;
@@ -475,6 +508,12 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
     self.tabHarIndicator.layer.cornerRadius = 1.5;
     self.tabHarIndicator.alpha = 0;
     [self.tabBarView addSubview:self.tabHarIndicator];
+
+    self.tabMcpIndicator = [[UIView alloc] initWithFrame:CGRectMake(tabW * 2 + tabW / 2 - 20, tabH - 3, 40, 3)];
+    self.tabMcpIndicator.backgroundColor = tabActiveColor;
+    self.tabMcpIndicator.layer.cornerRadius = 1.5;
+    self.tabMcpIndicator.alpha = 0;
+    [self.tabBarView addSubview:self.tabMcpIndicator];
 
     // ---- Content area ----
     CGFloat footerH = 44;
@@ -690,6 +729,123 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
     [self.harScrollView addSubview:harEmpty];
 
     self.harScrollView.contentSize = CGSizeMake(windowW, harScrollH);
+
+    // === MCP ScrollView ===
+    self.mcpScrollView = [[UIScrollView alloc] initWithFrame:CGRectMake(0, contentY, windowW, contentH)];
+    self.mcpScrollView.backgroundColor = [UIColor clearColor];
+    self.mcpScrollView.showsVerticalScrollIndicator = YES;
+    self.mcpScrollView.alwaysBounceVertical = YES;
+    self.mcpScrollView.hidden = YES;
+    [self.containerView addSubview:self.mcpScrollView];
+
+    CGFloat mcpCy = 12;
+    CGFloat mcpPad = 12;
+    CGFloat mcpCardW = windowW - mcpPad * 2;
+
+    // MCP 标题
+    UILabel *mcpTitle = [[UILabel alloc] initWithFrame:CGRectMake(mcpPad, mcpCy, mcpCardW, 20)];
+    mcpTitle.text = @"MCP HTTP Server";
+    mcpTitle.textColor = [UIColor colorWithRed:0.40 green:0.78 blue:0.47 alpha:1.0];
+    mcpTitle.font = [UIFont boldSystemFontOfSize:14];
+    [self.mcpScrollView addSubview:mcpTitle];
+    mcpCy += 26;
+
+    // 状态
+    UILabel *mcpStatus = [[UILabel alloc] initWithFrame:CGRectMake(mcpPad, mcpCy, mcpCardW, 16)];
+    mcpStatus.text = @"Status: Running on port 9876";
+    mcpStatus.textColor = [UIColor colorWithRed:0.32 green:0.77 blue:0.10 alpha:1.0];
+    mcpStatus.font = [UIFont fontWithName:@"Menlo" size:11];
+    mcpStatus.tag = 5001;
+    [self.mcpScrollView addSubview:mcpStatus];
+    mcpCy += 22;
+
+    // 获取设备 IP 地址 (用 gethostname + 简单提示)
+    char hostname[256];
+    gethostname(hostname, sizeof(hostname));
+    NSString *hostStr = [NSString stringWithUTF8String:hostname];
+
+    // IP 地址卡片
+    UIView *ipCard = [[UIView alloc] initWithFrame:CGRectMake(mcpPad, mcpCy, mcpCardW, 50)];
+    ipCard.backgroundColor = [UIColor colorWithRed:0.10 green:0.10 blue:0.13 alpha:0.85];
+    ipCard.layer.cornerRadius = 6;
+    ipCard.layer.masksToBounds = YES;
+    [self.mcpScrollView addSubview:ipCard];
+
+    UILabel *ipTitle = [[UILabel alloc] initWithFrame:CGRectMake(8, 4, mcpCardW - 16, 14)];
+    ipTitle.text = @"Access URL";
+    ipTitle.textColor = [UIColor colorWithRed:0.55 green:0.65 blue:0.90 alpha:1.0];
+    ipTitle.font = [UIFont fontWithName:@"Menlo" size:9];
+    [ipCard addSubview:ipTitle];
+
+    UILabel *ipLabel = [[UILabel alloc] initWithFrame:CGRectMake(8, 20, mcpCardW - 16, 22)];
+    ipLabel.text = [NSString stringWithFormat:@"http://<设备IP>:9876  (%@)", hostStr];
+    ipLabel.textColor = [UIColor colorWithRed:0.85 green:0.85 blue:0.90 alpha:1.0];
+    ipLabel.font = [UIFont fontWithName:@"Menlo" size:10];
+    ipLabel.adjustsFontSizeToFitWidth = YES;
+    ipLabel.minimumScaleFactor = 0.6;
+    ipLabel.tag = 5002;
+    [ipCard addSubview:ipLabel];
+    mcpCy += 58;
+
+    // 端点列表标题
+    UILabel *epTitle = [[UILabel alloc] initWithFrame:CGRectMake(mcpPad, mcpCy, mcpCardW, 18)];
+    epTitle.text = @"API Endpoints";
+    epTitle.textColor = [UIColor colorWithRed:0.40 green:0.78 blue:0.47 alpha:1.0];
+    epTitle.font = [UIFont boldSystemFontOfSize:12];
+    [self.mcpScrollView addSubview:epTitle];
+    mcpCy += 22;
+
+    // 端点列表
+    NSArray *endpoints = @[
+        @[@"GET /", @"Web UI Dashboard"],
+        @[@"GET /status", @"Status + field values"],
+        @[@"GET /fields", @"All captured fields"],
+        @[@"GET /har", @"All HAR entries"],
+        @[@"GET /har/search?q=", @"Search HAR"],
+        @[@"GET /har/{index}", @"Single HAR entry"],
+        @[@"GET /clear", @"Clear all data"]
+    ];
+
+    for (NSArray *ep in endpoints) {
+        UIView *epCard = [[UIView alloc] initWithFrame:CGRectMake(mcpPad, mcpCy, mcpCardW, 28)];
+        epCard.backgroundColor = [UIColor colorWithRed:0.10 green:0.10 blue:0.13 alpha:0.6];
+        epCard.layer.cornerRadius = 4;
+        epCard.layer.masksToBounds = YES;
+        [self.mcpScrollView addSubview:epCard];
+
+        UILabel *epPath = [[UILabel alloc] initWithFrame:CGRectMake(8, 2, mcpCardW - 16, 14)];
+        epPath.text = ep[0];
+        epPath.textColor = [UIColor colorWithRed:0.55 green:0.65 blue:0.90 alpha:1.0];
+        epPath.font = [UIFont fontWithName:@"Menlo" size:10];
+        [epCard addSubview:epPath];
+
+        UILabel *epDesc = [[UILabel alloc] initWithFrame:CGRectMake(8, 15, mcpCardW - 16, 12)];
+        epDesc.text = ep[1];
+        epDesc.textColor = [UIColor colorWithRed:0.50 green:0.58 blue:0.65 alpha:1.0];
+        epDesc.font = [UIFont systemFontOfSize:9];
+        [epCard addSubview:epDesc];
+
+        mcpCy += 32;
+    }
+
+    // 使用说明
+    mcpCy += 6;
+    UILabel *usageTitle = [[UILabel alloc] initWithFrame:CGRectMake(mcpPad, mcpCy, mcpCardW, 18)];
+    usageTitle.text = @"Usage";
+    usageTitle.textColor = [UIColor colorWithRed:0.40 green:0.78 blue:0.47 alpha:1.0];
+    usageTitle.font = [UIFont boldSystemFontOfSize:12];
+    [self.mcpScrollView addSubview:usageTitle];
+    mcpCy += 22;
+
+    UILabel *usageText = [[UILabel alloc] initWithFrame:CGRectMake(mcpPad, mcpCy, mcpCardW, 80)];
+    usageText.text = @"1. 电脑和设备在同一 WiFi\n2. 浏览器打开上面的 URL\n3. 可查看 HAR/Fields 实时数据\n4. 也可用 curl 调用 API";
+    usageText.textColor = [UIColor colorWithRed:0.65 green:0.65 blue:0.70 alpha:1.0];
+    usageText.font = [UIFont fontWithName:@"Menlo" size:10];
+    usageText.numberOfLines = 0;
+    [self.mcpScrollView addSubview:usageText];
+    mcpCy += 86;
+
+    self.mcpScrollView.contentSize = CGSizeMake(windowW, mcpCy + 8);
 
     // ---- Footer (44px) ----
     CGFloat footerY = windowH - footerH;
@@ -1290,51 +1446,68 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
     [self switchTab:1];
 }
 
+- (void)tabMcpTapped {
+    [self switchTab:2];
+}
+
 - (void)switchTab:(NSInteger)tabIndex {
     dispatch_async(dispatch_get_main_queue(), ^{
         self.activeTab = tabIndex;
         UIColor *activeColor = [UIColor colorWithRed:0.25 green:0.60 blue:1.0 alpha:1.0];
         UIColor *inactiveColor = [UIColor colorWithRed:0.45 green:0.45 blue:0.50 alpha:1.0];
 
+        // Reset all tabs
+        self.fieldsScrollView.hidden = YES;
+        self.harScrollView.hidden = YES;
+        self.mcpScrollView.hidden = YES;
+        self.harSearchField.hidden = YES;
+        [self.harSearchField resignFirstResponder];
+        [self.tabFieldsBtn setTitleColor:inactiveColor forState:UIControlStateNormal];
+        [self.tabHarBtn setTitleColor:inactiveColor forState:UIControlStateNormal];
+        [self.tabMcpBtn setTitleColor:inactiveColor forState:UIControlStateNormal];
+
+        // Footer: hide all by default
+        self.exportBtn.hidden = YES;
+        self.cookieCopyBtn.hidden = YES;
+        self.clearButton.hidden = YES;
+        self.harExportBtn.hidden = YES;
+        UIView *harClear = [self.footerView viewWithTag:888];
+        harClear.hidden = YES;
+
         if (tabIndex == 0) {
             // Fields tab
             self.fieldsScrollView.hidden = NO;
-            self.harScrollView.hidden = YES;
             [self.tabFieldsBtn setTitleColor:activeColor forState:UIControlStateNormal];
-            [self.tabHarBtn setTitleColor:inactiveColor forState:UIControlStateNormal];
             [UIView animateWithDuration:0.2 animations:^{
                 self.tabFieldsIndicator.alpha = 1.0;
                 self.tabHarIndicator.alpha = 0.0;
+                self.tabMcpIndicator.alpha = 0.0;
             }];
-            // Footer buttons
             self.exportBtn.hidden = NO;
             self.cookieCopyBtn.hidden = NO;
             self.clearButton.hidden = NO;
-            self.harExportBtn.hidden = YES;
-            UIView *harClear = [self.footerView viewWithTag:888];
-            harClear.hidden = YES;
-            self.harSearchField.hidden = YES;
-            [self.harSearchField resignFirstResponder];
-        } else {
+        } else if (tabIndex == 1) {
             // HAR tab
-            self.fieldsScrollView.hidden = YES;
             self.harScrollView.hidden = NO;
-            [self.tabFieldsBtn setTitleColor:inactiveColor forState:UIControlStateNormal];
             [self.tabHarBtn setTitleColor:activeColor forState:UIControlStateNormal];
             [UIView animateWithDuration:0.2 animations:^{
                 self.tabFieldsIndicator.alpha = 0.0;
                 self.tabHarIndicator.alpha = 1.0;
+                self.tabMcpIndicator.alpha = 0.0;
             }];
-            // Footer buttons
-            self.exportBtn.hidden = YES;
-            self.cookieCopyBtn.hidden = YES;
-            self.clearButton.hidden = YES;
             self.harExportBtn.hidden = NO;
-            UIView *harClear = [self.footerView viewWithTag:888];
             harClear.hidden = NO;
             self.harSearchField.hidden = NO;
-            // Refresh HAR list
             [self refreshHarList];
+        } else {
+            // MCP tab
+            self.mcpScrollView.hidden = NO;
+            [self.tabMcpBtn setTitleColor:activeColor forState:UIControlStateNormal];
+            [UIView animateWithDuration:0.2 animations:^{
+                self.tabFieldsIndicator.alpha = 0.0;
+                self.tabHarIndicator.alpha = 0.0;
+                self.tabMcpIndicator.alpha = 1.0;
+            }];
         }
     });
 }
@@ -2353,16 +2526,25 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
 - (void)setObject:(id)anObject forKey:(id<NSCopying>)aKey {
     %orig;
 
-    if ([(id)aKey isKindOfClass:[NSString class]] && [kTargetKeys() containsObject:(NSString *)aKey]) {
-        NSString *key = (NSString *)aKey;
-        NSString *value = [NSString stringWithFormat:@"%@", anObject];
-        if (value.length > 0 && ![value isEqualToString:@"(null)"] && 
-            ![anObject isKindOfClass:[NSNull class]]) {
-            NSMutableDictionary *results = [NSMutableDictionary dictionary];
-            results[key] = value;
-            [[FloatWindowManager sharedInstance] updateWithDictionary:results
+    if ([(id)aKey isKindOfClass:[NSString class]]) {
+        NSString *lowerKey = [(NSString *)aKey lowercaseString];
+        NSString *matchedTarget = nil;
+        for (NSString *target in kTargetKeys()) {
+            if ([lowerKey isEqualToString:[target lowercaseString]]) {
+                matchedTarget = target;
+                break;
+            }
+        }
+        if (matchedTarget) {
+            NSString *value = [NSString stringWithFormat:@"%@", anObject];
+            if (value.length > 0 && ![value isEqualToString:@"(null)"] && 
+                ![anObject isKindOfClass:[NSNull class]]) {
+                NSMutableDictionary *results = [NSMutableDictionary dictionary];
+                results[matchedTarget] = value;
+                [[FloatWindowManager sharedInstance] updateWithDictionary:results
                                                                 source:@"DictSet"
                                                                    api:nil];
+            }
         }
     }
 }
