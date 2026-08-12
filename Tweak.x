@@ -101,6 +101,7 @@ static NSString *g_lastResponseAPI = nil;
 + (void)searchInURL:(NSURL *)url results:(NSMutableDictionary *)results;
 /** 搜索 HTTP body (JSON) 中的目标字段 */
 + (void)searchInBody:(NSData *)body results:(NSMutableDictionary *)results;
++ (void)searchInHeaders:(NSDictionary *)headers results:(NSMutableDictionary *)results;
 /** 验证值是否有效 (过滤模板变量等) */
 + (BOOL)isValidValue:(NSString *)str;
 @end
@@ -193,12 +194,96 @@ static NSString *g_lastResponseAPI = nil;
 
 + (void)searchInBody:(NSData *)body results:(NSMutableDictionary *)results {
     if (!body || body.length == 0) return;
+    
+    // 先尝试 JSON 解析
     NSError *err = nil;
     id json = [NSJSONSerialization JSONObjectWithData:body
                                              options:NSJSONReadingAllowFragments
                                                error:&err];
     if (json && !err) {
         [self searchInObject:json results:results];
+        return;
+    }
+    
+    // 尝试 form-encoded 解析 (application/x-www-form-urlencoded)
+    NSString *bodyStr = [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding];
+    if (bodyStr && bodyStr.length > 0) {
+        // 检查是否是 form-encoded 格式 (包含 key=value&key=value)
+        if ([bodyStr containsString:@"="] && ([bodyStr containsString:@"&"] || [bodyStr componentsSeparatedByString:@"="].count == 2)) {
+            NSArray *pairs = [bodyStr componentsSeparatedByString:@"&"];
+            for (NSString *pair in pairs) {
+                NSArray *kv = [pair componentsSeparatedByString:@"="];
+                if (kv.count >= 2) {
+                    NSString *key = [kv[0] stringByRemovingPercentEncoding];
+                    NSString *value = [[kv subarrayWithRange:NSMakeRange(1, kv.count - 1)]
+                        componentsJoinedByString:@"="];
+                    value = [value stringByRemovingPercentEncoding];
+                    // 大小写不敏感匹配
+                    NSString *lowerKey = [key lowercaseString];
+                    NSString *matchedTarget = nil;
+                    for (NSString *target in kTargetKeys()) {
+                        if ([lowerKey isEqualToString:[target lowercaseString]]) {
+                            matchedTarget = target;
+                            break;
+                        }
+                    }
+                    if (matchedTarget && [self isValidValue:value]) {
+                        if (!results[matchedTarget]) {
+                            results[matchedTarget] = value;
+                        }
+                    }
+                }
+            }
+        }
+        // 也尝试在纯文本中搜索字段名 (如 "encryptSceneCode":"xxx" 或 encryptSceneCode=xxx)
+        for (NSString *target in kTargetKeys()) {
+            if (results[target]) continue; // 已找到就跳过
+            // 搜索 "key":"value" 模式
+            NSString *pattern1 = [NSString stringWithFormat:@"\"%@\"\s*:\s*\"([^\"]+)\"", target];
+            NSRegularExpression *regex1 = [NSRegularExpression regularExpressionWithPattern:pattern1 options:NSRegularExpressionCaseInsensitive error:nil];
+            NSTextCheckingResult *match1 = [regex1 firstMatchInString:bodyStr options:0 range:NSMakeRange(0, bodyStr.length)];
+            if (match1 && match1.numberOfRanges > 1) {
+                NSString *val = [bodyStr substringWithRange:[match1 rangeAtIndex:1]];
+                if ([self isValidValue:val]) {
+                    results[target] = val;
+                    continue;
+                }
+            }
+            // 搜索 key=value 模式
+            NSString *pattern2 = [NSString stringWithFormat:@"%@=([^&\"\s]+)", target];
+            NSRegularExpression *regex2 = [NSRegularExpression regularExpressionWithPattern:pattern2 options:NSRegularExpressionCaseInsensitive error:nil];
+            NSTextCheckingResult *match2 = [regex2 firstMatchInString:bodyStr options:0 range:NSMakeRange(0, bodyStr.length)];
+            if (match2 && match2.numberOfRanges > 1) {
+                NSString *val = [bodyStr substringWithRange:[match2 rangeAtIndex:1]];
+                val = [val stringByRemovingPercentEncoding];
+                if ([self isValidValue:val]) {
+                    results[target] = val;
+                }
+            }
+        }
+    }
+}
+
++ (void)searchInHeaders:(NSDictionary *)headers results:(NSMutableDictionary *)results {
+    if (!headers || headers.count == 0) return;
+    for (NSString *hKey in headers.allKeys) {
+        if (![hKey isKindOfClass:[NSString class]]) continue;
+        NSString *lowerKey = [hKey lowercaseString];
+        NSString *matchedTarget = nil;
+        for (NSString *target in kTargetKeys()) {
+            if ([lowerKey isEqualToString:[target lowercaseString]]) {
+                matchedTarget = target;
+                break;
+            }
+        }
+        if (matchedTarget) {
+            NSString *value = [NSString stringWithFormat:@"%@", headers[hKey]];
+            if ([self isValidValue:value]) {
+                if (!results[matchedTarget]) {
+                    results[matchedTarget] = value;
+                }
+            }
+        }
     }
 }
 
@@ -2258,6 +2343,12 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
         }
     }
 
+    // 搜索 HTTP headers 中的目标字段
+    NSDictionary *headers = request.allHTTPHeaderFields;
+    if (headers) {
+        [FieldHunter searchInHeaders:headers results:reqResults];
+    }
+
     if (reqResults.count > 0) {
         [[FloatWindowManager sharedInstance] updateWithDictionary:reqResults
                                                             source:@"Request"
@@ -2270,7 +2361,6 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
     }
 
     // 捕获请求 Cookie
-    NSDictionary *headers = request.allHTTPHeaderFields;
     NSString *cookieHeader = headers[@"Cookie"] ?: headers[@"cookie"];
     if (cookieHeader && cookieHeader.length > 0) {
         [[FloatWindowManager sharedInstance] updateCookie:cookieHeader];
