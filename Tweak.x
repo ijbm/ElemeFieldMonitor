@@ -1433,6 +1433,12 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
 
 - (void)recordAPIResponse:(NSString *)api response:(NSString *)response statusCode:(NSInteger)code {
     if (!api || api.length == 0) return;
+    // 如果 code 为 0 但有响应内容，说明是 delegate-based 请求，
+    // 响应数据通过 JSON hook 捕获但没有 HTTP 状态码，默认设为 200
+    NSInteger effectiveCode = code;
+    if (effectiveCode == 0 && response && response.length > 0 && ![response isEqualToString:@"-"]) {
+        effectiveCode = 200;
+    }
     dispatch_async(dispatch_get_main_queue(), ^{
         // FIFO 查找匹配的 pending request
         NSDictionary *pendingReq = nil;
@@ -1460,15 +1466,20 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
                         // 已有正确 status，跳过不创建重复
                         NSLog(@"[ElemeFieldMonitor] Response duplicate skipped: %@ (existing status: %ld)", api, (long)existingStatus);
                         return;
-                    } else if (code > 0) {
-                        // 更新现有条目的 status
+                    } else if (effectiveCode > 0) {
+                        // 更新现有条目的 status 和 response
                         NSMutableDictionary *mutableEntry = [existing mutableCopy];
                         NSMutableDictionary *mutableResp = [existingResp mutableCopy];
-                        mutableResp[@"status"] = @(code);
+                        mutableResp[@"status"] = @(effectiveCode);
                         mutableResp[@"statusText"] = @"OK";
+                        // 也更新响应内容（之前可能是空的）
+                        if (response && response.length > 0) {
+                            mutableResp[@"content"] = @{@"mimeType": @"application/json", @"text": response, @"size": @(response.length)};
+                            mutableResp[@"bodySize"] = @(response.length);
+                        }
                         mutableEntry[@"response"] = mutableResp;
                         [self.harEntries replaceObjectAtIndex:i withObject:mutableEntry];
-                        NSLog(@"[ElemeFieldMonitor] Updated existing entry status: %@ -> %ld", api, (long)code);
+                        NSLog(@"[ElemeFieldMonitor] Updated existing entry status: %@ -> %ld", api, (long)effectiveCode);
                         foundExisting = YES;
                     }
                     break;
@@ -1521,8 +1532,8 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
         NSString *respStr = response ?: @"";
         NSInteger respSize = respStr.length;
         entry[@"response"] = @{
-            @"status": @(code),
-            @"statusText": code > 0 ? @"OK" : @"(unknown)",
+            @"status": @(effectiveCode),
+            @"statusText": effectiveCode > 0 ? @"OK" : @"(unknown)",
             @"httpVersion": @"HTTP/1.1",
             @"headers": @[],
             @"cookies": @[],
@@ -2442,6 +2453,13 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
         }
         if (data && data.length > 0) {
             @try {
+                // 先提取状态码，设置 g_lastStatusCode 供 JSON hook 使用
+                NSInteger statusCode = 0;
+                if ([response isKindOfClass:[NSHTTPURLResponse class]]) {
+                    statusCode = ((NSHTTPURLResponse *)response).statusCode;
+                }
+                g_lastStatusCode = statusCode;
+                
                 NSMutableDictionary *respResults = [NSMutableDictionary dictionary];
                 [FieldHunter searchInBody:data results:respResults];
                 // 尝试从响应中提取 API 名称
@@ -2464,12 +2482,6 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
                 NSString *effectiveAPI = respAPI ?: requestAPI;
                 if (effectiveAPI && effectiveAPI.length > 0) {
                     NSString *respStr = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] ?: @"-";
-                    NSInteger statusCode = 0;
-                    if ([response isKindOfClass:[NSHTTPURLResponse class]]) {
-                        statusCode = ((NSHTTPURLResponse *)response).statusCode;
-                    }
-                    // 缓存状态码和 API 名，供 JSON hook 使用
-                    g_lastStatusCode = statusCode;
                     g_lastResponseAPI = [effectiveAPI copy];
                     [[FloatWindowManager sharedInstance] recordAPIResponse:effectiveAPI
                                                                    response:respStr
