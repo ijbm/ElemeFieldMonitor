@@ -32,7 +32,8 @@ static NSArray *kTargetKeys(void) {
             @"rightId",
             @"sourceFrom",
             @"sceneCode",
-            @"actCode"
+            @"actCode",
+            @"pagePath"
         ];
     });
     return keys;
@@ -711,6 +712,8 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
           @"fields": @[@"rightId", @"actCode", @"sceneCode"]},
         @{@"title": @"来源", @"r": @0.98, @"g": @0.55, @"b": @0.09,
           @"fields": @[@"sourceFrom"]},
+        @{@"title": @"页面", @"r": @0.55, @"g": @0.35, @"b": @0.75,
+          @"fields": @[@"pagePath"]},
     ];
 
     CGFloat cardH = 36;
@@ -757,18 +760,22 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
         cy += groupHeaderH + 3;
 
         for (NSString *fieldName in gFields) {
-            UIView *card = [[UIView alloc] initWithFrame:CGRectMake(sidePad, cy, windowW - sidePad * 2, cardH)];
+            // pagePath 值很长，用更高的卡片和多行显示
+            BOOL isLongField = [fieldName isEqualToString:@"pagePath"];
+            CGFloat fieldCardH = isLongField ? 60 : cardH;
+            
+            UIView *card = [[UIView alloc] initWithFrame:CGRectMake(sidePad, cy, windowW - sidePad * 2, fieldCardH)];
             card.backgroundColor = cardBg;
             card.layer.cornerRadius = 5;
             card.layer.masksToBounds = YES;
             [self.fieldsScrollView addSubview:card];
 
-            UIView *cardBar = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 2, cardH)];
+            UIView *cardBar = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 2, fieldCardH)];
             cardBar.backgroundColor = [accent colorWithAlphaComponent:0.4];
             [card addSubview:cardBar];
 
             CGFloat keyW = 120;
-            UILabel *keyLabel = [[UILabel alloc] initWithFrame:CGRectMake(8, 0, keyW, cardH)];
+            UILabel *keyLabel = [[UILabel alloc] initWithFrame:CGRectMake(8, 0, keyW, fieldCardH)];
             keyLabel.text = fieldName;
             keyLabel.textColor = keyColor;
             keyLabel.font = [UIFont fontWithName:@"Menlo" size:10];
@@ -777,17 +784,17 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
             keyLabel.minimumScaleFactor = 0.6;
             [card addSubview:keyLabel];
 
-            UIView *vDivider = [[UIView alloc] initWithFrame:CGRectMake(keyW + 6, 5, 1, cardH - 10)];
+            UIView *vDivider = [[UIView alloc] initWithFrame:CGRectMake(keyW + 6, 5, 1, fieldCardH - 10)];
             vDivider.backgroundColor = [UIColor colorWithRed:0.2 green:0.2 blue:0.24 alpha:0.6];
             [card addSubview:vDivider];
 
-            UILabel *valueLabel = [[UILabel alloc] initWithFrame:CGRectMake(keyW + 12, 0, card.bounds.size.width - keyW - 18, cardH)];
+            UILabel *valueLabel = [[UILabel alloc] initWithFrame:CGRectMake(keyW + 12, 0, card.bounds.size.width - keyW - 18, fieldCardH)];
             valueLabel.text = @"(waiting...)";
             valueLabel.textColor = notFoundColor;
             valueLabel.font = [UIFont fontWithName:@"Menlo" size:10];
             valueLabel.adjustsFontSizeToFitWidth = YES;
             valueLabel.minimumScaleFactor = 0.4;
-            valueLabel.numberOfLines = 1;
+            valueLabel.numberOfLines = isLongField ? 3 : 1;
             valueLabel.textAlignment = NSTextAlignmentLeft;
             [card addSubview:valueLabel];
 
@@ -798,7 +805,7 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
             longPress.minimumPressDuration = 0.5;
             [card addGestureRecognizer:longPress];
 
-            cy += cardH + cardSpacing;
+            cy += fieldCardH + cardSpacing;
         }
     }
 
