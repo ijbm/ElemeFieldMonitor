@@ -205,10 +205,30 @@ static NSString *g_lastResponseAPI = nil;
         return;
     }
     
-    // 尝试 form-encoded 解析 (application/x-www-form-urlencoded)
+    // 尝试从 JSONP 响应中提取 JSON (如 kangaroo({...}) 或 callback({...}))
     NSString *bodyStr = [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding];
     if (bodyStr && bodyStr.length > 0) {
-        // 检查是否是 form-encoded 格式 (包含 key=value&key=value)
+        // JSONP 格式: prefix({...json...})  或  prefix({...json...})
+        NSRange parenStart = [bodyStr rangeOfString:@"("];
+        if (parenStart.location != NSNotFound) {
+            // 从最后一个 ) 往前找
+            NSRange parenEnd = [bodyStr rangeOfString:@")" options:NSBackwardsSearch];
+            if (parenEnd.location != NSNotFound && parenEnd.location > parenStart.location) {
+                NSString *jsonContent = [bodyStr substringWithRange:NSMakeRange(parenStart.location + 1, parenEnd.location - parenStart.location - 1)];
+                NSData *jsonData = [jsonContent dataUsingEncoding:NSUTF8StringEncoding];
+                if (jsonData) {
+                    id jsonpJson = [NSJSONSerialization JSONObjectWithData:jsonData
+                                                                   options:NSJSONReadingAllowFragments
+                                                                     error:nil];
+                    if (jsonpJson) {
+                        [self searchInObject:jsonpJson results:results];
+                        return;
+                    }
+                }
+            }
+        }
+        
+        // 尝试 form-encoded 解析 (application/x-www-form-urlencoded)
         if ([bodyStr containsString:@"="] && ([bodyStr containsString:@"&"] || [bodyStr componentsSeparatedByString:@"="].count == 2)) {
             NSArray *pairs = [bodyStr componentsSeparatedByString:@"&"];
             for (NSString *pair in pairs) {
