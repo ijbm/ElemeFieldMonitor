@@ -2542,7 +2542,7 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
                     // 非文本响应（图片、二进制等）
                     NSString *mimeType = @"";
                     if ([response isKindOfClass:[NSHTTPURLResponse class]]) {
-                        mimeType = ((NSHTTPURLResponse *)response).MIMEString ?: @"";
+                        mimeType = ((NSHTTPURLResponse *)response).MIMEType ?: @"";
                     }
                     respStr = [NSString stringWithFormat:@"(binary data, %lu bytes, %@)", (unsigned long)data.length, mimeType];
                 }
@@ -2690,7 +2690,7 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
         if (!respStr) {
             NSString *mimeType = @"";
             if (response && [*response isKindOfClass:[NSHTTPURLResponse class]]) {
-                mimeType = ((NSHTTPURLResponse *)*response).MIMEString ?: @"";
+                mimeType = ((NSHTTPURLResponse *)*response).MIMEType ?: @"";
             }
             respStr = [NSString stringWithFormat:@"(binary data, %lu bytes, %@)", (unsigned long)data.length, mimeType];
         }
@@ -2738,7 +2738,7 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
             if (!respStr) {
                 NSString *mimeType = @"";
                 if ([response isKindOfClass:[NSHTTPURLResponse class]]) {
-                    mimeType = ((NSHTTPURLResponse *)response).MIMEString ?: @"";
+                    mimeType = ((NSHTTPURLResponse *)response).MIMEType ?: @"";
                 }
                 respStr = [NSString stringWithFormat:@"(binary data, %lu bytes, %@)", (unsigned long)data.length, mimeType];
             }
