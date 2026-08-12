@@ -431,7 +431,20 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
         }
     }
     
-    if (!api || api.length == 0) return;
+    // 没有 MTOP API 名时，使用 URL path 作为标识符，确保所有请求都被记录
+    if (!api || api.length == 0) {
+        if (url) {
+            NSString *path = url.path ?: @"";
+            NSString *host = url.host ?: @"";
+            if (path.length > 0) {
+                api = [NSString stringWithFormat:@"%@%@", host, path];
+            } else {
+                api = host.length > 0 ? host : url.absoluteString;
+            }
+        } else {
+            return;
+        }
+    }
     
     NSString *bodyStr = @"-";
     NSData *body = request.HTTPBody;
@@ -444,7 +457,7 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
                                                    method:request.HTTPMethod ?: @"GET"
                                                   headers:request.allHTTPHeaderFields ?: @{}
                                                      body:bodyStr];
-    NSLog(@"[ElemeFieldMonitor] Target API request captured: %@", api);
+    NSLog(@"[ElemeFieldMonitor] Request captured: %@", api);
 }
 
 @implementation FloatWindowManager
@@ -1411,7 +1424,10 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
 }
 
 - (void)recordAPIRequest:(NSString *)api url:(NSString *)url method:(NSString *)method headers:(NSDictionary *)headers body:(NSString *)body {
-    if (!api || api.length == 0) return;
+    if (!api || api.length == 0) {
+        // 没有API名时用URL作为标识
+        api = url ?: @"unknown";
+    }
     dispatch_async(dispatch_get_main_queue(), ^{
         NSMutableDictionary *req = [NSMutableDictionary dictionary];
         req[@"_api"] = api;
@@ -1432,7 +1448,9 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
 }
 
 - (void)recordAPIResponse:(NSString *)api response:(NSString *)response statusCode:(NSInteger)code {
-    if (!api || api.length == 0) return;
+    if (!api || api.length == 0) {
+        api = @"unknown";
+    }
     // 如果 code 为 0 但有响应内容，说明是 delegate-based 请求，
     // 响应数据通过 JSON hook 捕获但没有 HTTP 状态码，默认设为 200
     NSInteger effectiveCode = code;
@@ -2276,11 +2294,20 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
             }
             
             // 如果有 API 名称，区分请求信封和响应（不受 results 门控，不限目标 API）
-            if (api && api.length > 0) {
+            {
                 NSString *rawStr = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] ?: @"-";
                 NSDictionary *dict = (NSDictionary *)result;
                 BOOL isRequestEnvelope = (dict[@"param"] != nil && dict[@"data"] == nil && dict[@"ret"] == nil);
                 BOOL isResponse = (dict[@"data"] != nil || dict[@"ret"] != nil);
+                
+                // 没有 API 名时用 URL 作为标识
+                if (!api || api.length == 0) {
+                    if (g_lastURL) {
+                        api = g_lastURL;
+                    } else {
+                        api = @"unknown";
+                    }
+                }
                 
                 if (isRequestEnvelope) {
                     // MTOP 请求信封（被 JSON 解析捕获）
@@ -2292,19 +2319,19 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
                                                                    method:reqMethod
                                                                   headers:reqHeaders
                                                                      body:rawStr];
-                    NSLog(@"[ElemeFieldMonitor] Target API request (envelope) captured: %@", api);
+                    NSLog(@"[ElemeFieldMonitor] Request (envelope) captured: %@", api);
                 } else if (isResponse) {
                     // MTOP 响应（使用 g_lastStatusCode 供 JSON hook 获取状态码）
                     [[FloatWindowManager sharedInstance] recordAPIResponse:api
                                                                    response:rawStr
                                                                   statusCode:g_lastStatusCode];
-                    NSLog(@"[ElemeFieldMonitor] Target API response (JSON) captured: %@ (status: %ld)", api, (long)g_lastStatusCode);
+                    NSLog(@"[ElemeFieldMonitor] Response (JSON) captured: %@ (status: %ld)", api, (long)g_lastStatusCode);
                 } else {
                     // 未知类型，默认当响应
                     [[FloatWindowManager sharedInstance] recordAPIResponse:api
                                                                    response:rawStr
                                                                   statusCode:g_lastStatusCode];
-                    NSLog(@"[ElemeFieldMonitor] Target API unknown (JSON) captured: %@ (status: %ld)", api, (long)g_lastStatusCode);
+                    NSLog(@"[ElemeFieldMonitor] Response (JSON unknown) captured: %@ (status: %ld)", api, (long)g_lastStatusCode);
                 }
             }
         } @catch (NSException *e) {
@@ -2426,8 +2453,22 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
         [[FloatWindowManager sharedInstance] updateCookie:cookieHeader];
     }
 
-    // 如果有 API 名称，记录完整请求信息（不限目标 API）
-    if (requestAPI && requestAPI.length > 0) {
+    // 记录完整请求信息（所有请求，不限目标 API）
+    {
+        // 没有 API 名时用 URL path 作为标识
+        if (!requestAPI || requestAPI.length == 0) {
+            if (url) {
+                NSString *path = url.path ?: @"";
+                NSString *host = url.host ?: @"";
+                if (path.length > 0) {
+                    requestAPI = [NSString stringWithFormat:@"%@%@", host, path];
+                } else {
+                    requestAPI = host.length > 0 ? host : url.absoluteString;
+                }
+            } else {
+                requestAPI = @"unknown";
+            }
+        }
         NSString *bodyStr = @"-";
         if (body) {
             bodyStr = [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding] ?: @"-";
@@ -2478,16 +2519,38 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
                                                                            api:respAPI ?: requestAPI];
                 }
                 
-                // 如果有 API 名称，记录完整响应（不限目标 API）
+                // 记录所有响应（不限目标 API）
                 NSString *effectiveAPI = respAPI ?: requestAPI;
-                if (effectiveAPI && effectiveAPI.length > 0) {
-                    NSString *respStr = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] ?: @"-";
-                    g_lastResponseAPI = [effectiveAPI copy];
-                    [[FloatWindowManager sharedInstance] recordAPIResponse:effectiveAPI
-                                                                   response:respStr
-                                                                  statusCode:statusCode];
-                    NSLog(@"[ElemeFieldMonitor] API response captured: %@ (status: %ld)", effectiveAPI, (long)statusCode);
+                if (!effectiveAPI || effectiveAPI.length == 0) {
+                    // 没有 API 名时用 URL path 作为标识
+                    NSURL *respUrl = request.URL;
+                    if (respUrl) {
+                        NSString *path = respUrl.path ?: @"";
+                        NSString *host = respUrl.host ?: @"";
+                        if (path.length > 0) {
+                            effectiveAPI = [NSString stringWithFormat:@"%@%@", host, path];
+                        } else {
+                            effectiveAPI = host.length > 0 ? host : respUrl.absoluteString;
+                        }
+                    } else {
+                        effectiveAPI = @"unknown";
+                    }
                 }
+                // 尝试将响应转为字符串，二进制数据用描述代替
+                NSString *respStr = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+                if (!respStr) {
+                    // 非文本响应（图片、二进制等）
+                    NSString *mimeType = @"";
+                    if ([response isKindOfClass:[NSHTTPURLResponse class]]) {
+                        mimeType = ((NSHTTPURLResponse *)response).MIMEString ?: @"";
+                    }
+                    respStr = [NSString stringWithFormat:@"(binary data, %lu bytes, %@)", (unsigned long)data.length, mimeType];
+                }
+                g_lastResponseAPI = [effectiveAPI copy];
+                [[FloatWindowManager sharedInstance] recordAPIResponse:effectiveAPI
+                                                               response:respStr
+                                                              statusCode:statusCode];
+                NSLog(@"[ElemeFieldMonitor] Response captured: %@ (status: %ld, %lu bytes)", effectiveAPI, (long)statusCode, (unsigned long)data.length);
             } @catch (NSException *e) {}
         }
         if (completionHandler) completionHandler(data, response, error);
@@ -2529,8 +2592,28 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
                                                                        api:api];
             }
             
-            // 如果有 API 名称，记录完整请求（不限目标 API，不受 results 门控）
-            if (api && api.length > 0) {
+            // 记录完整请求（不限目标 API，不受 results 门控）
+            // 如果 body 中没有 API，也检查 URL
+            if (!api || api.length == 0) {
+                NSURL *selfURL = [self URL];
+                api = extractAPIFromURL(selfURL);
+            }
+            // 仍然没有 API 名时用 URL path 作为标识
+            if (!api || api.length == 0) {
+                NSURL *selfURL = [self URL];
+                if (selfURL) {
+                    NSString *path = selfURL.path ?: @"";
+                    NSString *host = selfURL.host ?: @"";
+                    if (path.length > 0) {
+                        api = [NSString stringWithFormat:@"%@%@", host, path];
+                    } else {
+                        api = host.length > 0 ? host : selfURL.absoluteString;
+                    }
+                } else {
+                    api = @"unknown";
+                }
+            }
+            {
                 NSString *bodyStr = [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding] ?: @"-";
                 NSString *reqURL = @"-";
                 NSString *reqMethod = @"POST";
@@ -2546,21 +2629,7 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
                                                                method:reqMethod
                                                               headers:reqHeaders
                                                                  body:bodyStr];
-                NSLog(@"[ElemeFieldMonitor] API request (body) captured: %@", api);
-            }
-            // 如果 body 中没有 API，也检查 URL
-            if (!api || api.length == 0) {
-                NSURL *selfURL = [self URL];
-                NSString *urlAPI = extractAPIFromURL(selfURL);
-                if (urlAPI && urlAPI.length > 0) {
-                    NSString *bodyStr = [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding] ?: @"-";
-                    [[FloatWindowManager sharedInstance] recordAPIRequest:urlAPI
-                                                                      url:selfURL.absoluteString
-                                                                   method:[self HTTPMethod] ?: @"POST"
-                                                                  headers:[self allHTTPHeaderFields] ?: @{}
-                                                                     body:bodyStr];
-                    NSLog(@"[ElemeFieldMonitor] API request (URL) captured: %@", urlAPI);
-                }
+                NSLog(@"[ElemeFieldMonitor] Request (body) captured: %@", api);
             }
         } @catch (NSException *e) {}
     }
@@ -2591,7 +2660,7 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
 + (NSData *)sendSynchronousRequest:(NSURLRequest *)request returningResponse:(NSURLResponse **)response error:(NSError **)error {
     captureRequestIfNeeded(request);
     NSData *data = %orig;
-    // 记录响应
+    // 记录所有响应
     if (data && data.length > 0) {
         NSURL *url = request.URL;
         NSString *api = extractAPIFromURL(url);
@@ -2603,17 +2672,36 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
                 }
             } @catch (NSException *e) {}
         }
-        if (api && api.length > 0) {
-            NSString *respStr = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] ?: @"-";
-            NSInteger statusCode = 0;
-            if (response && [*response isKindOfClass:[NSHTTPURLResponse class]]) {
-                statusCode = ((NSHTTPURLResponse *)*response).statusCode;
+        // 没有 API 名时用 URL path 作为标识
+        if (!api || api.length == 0) {
+            if (url) {
+                NSString *path = url.path ?: @"";
+                NSString *host = url.host ?: @"";
+                if (path.length > 0) {
+                    api = [NSString stringWithFormat:@"%@%@", host, path];
+                } else {
+                    api = host.length > 0 ? host : url.absoluteString;
+                }
+            } else {
+                api = @"unknown";
             }
-            [[FloatWindowManager sharedInstance] recordAPIResponse:api
-                                                           response:respStr
-                                                          statusCode:statusCode];
-            NSLog(@"[ElemeFieldMonitor] API response (sync) captured: %@", api);
         }
+        NSString *respStr = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+        if (!respStr) {
+            NSString *mimeType = @"";
+            if (response && [*response isKindOfClass:[NSHTTPURLResponse class]]) {
+                mimeType = ((NSHTTPURLResponse *)*response).MIMEString ?: @"";
+            }
+            respStr = [NSString stringWithFormat:@"(binary data, %lu bytes, %@)", (unsigned long)data.length, mimeType];
+        }
+        NSInteger statusCode = 0;
+        if (response && [*response isKindOfClass:[NSHTTPURLResponse class]]) {
+            statusCode = ((NSHTTPURLResponse *)*response).statusCode;
+        }
+        [[FloatWindowManager sharedInstance] recordAPIResponse:api
+                                                       response:respStr
+                                                      statusCode:statusCode];
+        NSLog(@"[ElemeFieldMonitor] Response (sync) captured: %@ (status: %ld)", api, (long)statusCode);
     }
     return data;
 }
@@ -2632,17 +2720,36 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
                     }
                 } @catch (NSException *e) {}
             }
-            if (api && api.length > 0) {
-                NSString *respStr = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] ?: @"-";
-                NSInteger statusCode = 0;
-                if ([response isKindOfClass:[NSHTTPURLResponse class]]) {
-                    statusCode = ((NSHTTPURLResponse *)response).statusCode;
+            // 没有 API 名时用 URL path 作为标识
+            if (!api || api.length == 0) {
+                if (url) {
+                    NSString *path = url.path ?: @"";
+                    NSString *host = url.host ?: @"";
+                    if (path.length > 0) {
+                        api = [NSString stringWithFormat:@"%@%@", host, path];
+                    } else {
+                        api = host.length > 0 ? host : url.absoluteString;
+                    }
+                } else {
+                    api = @"unknown";
                 }
-                [[FloatWindowManager sharedInstance] recordAPIResponse:api
-                                                               response:respStr
-                                                              statusCode:statusCode];
-                NSLog(@"[ElemeFieldMonitor] API response (async) captured: %@", api);
             }
+            NSString *respStr = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+            if (!respStr) {
+                NSString *mimeType = @"";
+                if ([response isKindOfClass:[NSHTTPURLResponse class]]) {
+                    mimeType = ((NSHTTPURLResponse *)response).MIMEString ?: @"";
+                }
+                respStr = [NSString stringWithFormat:@"(binary data, %lu bytes, %@)", (unsigned long)data.length, mimeType];
+            }
+            NSInteger statusCode = 0;
+            if ([response isKindOfClass:[NSHTTPURLResponse class]]) {
+                statusCode = ((NSHTTPURLResponse *)response).statusCode;
+            }
+            [[FloatWindowManager sharedInstance] recordAPIResponse:api
+                                                           response:respStr
+                                                          statusCode:statusCode];
+            NSLog(@"[ElemeFieldMonitor] Response (async) captured: %@ (status: %ld)", api, (long)statusCode);
         }
         if (handler) handler(response, data, error);
     };
