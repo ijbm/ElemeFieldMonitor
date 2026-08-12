@@ -2516,7 +2516,7 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
     "</style></head><body>"
     "<div class='header'><h1>ElemeFieldMonitor</h1><div class='stats' id='stats'>Loading...</div>"
     "<div><button class='btn' onclick='clearData()'>Clear</button> <button class='btn' onclick='refresh()'>Refresh</button></div></div>"
-    "<div class='tabs'><div class='tab active' id='tab-har' onclick='switchTab("har")'>HAR</div><div class='tab' id='tab-fields' onclick='switchTab("fields")'>Fields</div></div>"
+    "<div class='tabs'><div class='tab active' id='tab-har' onclick='switchTab(\"har\")'>HAR</div><div class='tab' id='tab-fields' onclick='switchTab(\"fields\")'>Fields</div></div>"
     "<div class='content' id='content'></div>"
     "<div class='detail-overlay' id='overlay' onclick='closeDetail(event)'>"
     "<div class='detail-box' id='detailBox'></div></div>"
