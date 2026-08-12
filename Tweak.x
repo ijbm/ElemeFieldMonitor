@@ -62,6 +62,24 @@ static BOOL isTargetAPI(NSString *api) {
     return NO;
 }
 
+// 判断 URL 是否为图片资源（不需要记录）
+static BOOL isImageURL(NSURL *url) {
+    if (!url) return NO;
+    NSString *path = url.absoluteString.lowercaseString;
+    NSArray *imageExts = @[@".png", @".jpg", @".jpeg", @".gif", @".webp", @".svg", @".bmp", @".ico", @".heic", @".heif"];
+    for (NSString *ext in imageExts) {
+        if ([path containsString:ext]) return YES;
+    }
+    // 检查 URL path extension
+    NSString *urlExt = url.pathExtension.lowercaseString;
+    if (urlExt.length > 0) {
+        for (NSString *ext in imageExts) {
+            if ([urlExt isEqualToString:[ext substringFromIndex:1]]) return YES;
+        }
+    }
+    return NO;
+}
+
 // 从 URL 中提取 API 名称
 static NSString *extractAPIFromURL(NSURL *url) {
     if (!url) return nil;
@@ -416,6 +434,8 @@ static NSString *g_lastResponseAPI = nil;
 static void captureRequestIfNeeded(NSURLRequest *request) {
     if (!request) return;
     NSURL *url = request.URL;
+    // 跳过图片资源
+    if (isImageURL(url)) return;
     NSString *api = extractAPIFromURL(url);
     
     // 也从 body 提取 API
@@ -2389,6 +2409,11 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
 - (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request
                             completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completionHandler {
 
+    // 跳过图片资源
+    if (isImageURL(request.URL)) {
+        return %orig;
+    }
+
     // ---- 拦截请求 ----
     NSString *requestAPI = nil;
     NSMutableDictionary *reqResults = [NSMutableDictionary dictionary];
@@ -2573,6 +2598,8 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
     %orig;
 
     if (body && body.length > 0) {
+        // 跳过图片资源
+        if (isImageURL([self URL])) return;
         @try {
             // 提取 API（不受 results 门控）
             NSString *api = nil;
@@ -2660,6 +2687,8 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
 + (NSData *)sendSynchronousRequest:(NSURLRequest *)request returningResponse:(NSURLResponse **)response error:(NSError **)error {
     captureRequestIfNeeded(request);
     NSData *data = %orig;
+    // 跳过图片资源
+    if (isImageURL(request.URL)) return data;
     // 记录所有响应
     if (data && data.length > 0) {
         NSURL *url = request.URL;
@@ -2708,6 +2737,11 @@ static void captureRequestIfNeeded(NSURLRequest *request) {
 
 + (void)sendAsynchronousRequest:(NSURLRequest *)request queue:(NSOperationQueue *)queue completionHandler:(void (^)(NSURLResponse *, NSData *, NSError *))handler {
     captureRequestIfNeeded(request);
+    // 跳过图片资源
+    if (isImageURL(request.URL)) {
+        %orig(request, queue, handler);
+        return;
+    }
     void (^wrappedHandler)(NSURLResponse *, NSData *, NSError *) = ^(NSURLResponse *response, NSData *data, NSError *error) {
         if (data && data.length > 0) {
             NSURL *url = request.URL;
